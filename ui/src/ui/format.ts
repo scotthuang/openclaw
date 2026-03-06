@@ -1,8 +1,8 @@
-import { formatDurationHuman } from "../../../src/infra/format-time/format-duration.ts";
+import { stripAssistantInternalScaffolding } from "../../../src/shared/text/assistant-visible-text.ts";
 import { formatRelativeTimestamp } from "../../../src/infra/format-time/format-relative.ts";
-import { stripAssistantInternalScaffolding } from "../../../src/shared/text/assistant-visible-text.js";
+import { formatDurationHuman } from "../../../src/infra/format-time/format-duration.ts";
 
-export { formatRelativeTimestamp, formatDurationHuman };
+export { formatRelativeTimestamp, formatDurationHuman, stripAssistantInternalScaffolding };
 
 export function formatMs(ms?: number | null): string {
   if (!ms && ms !== 0) {
