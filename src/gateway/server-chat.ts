@@ -203,6 +203,8 @@ export type ChatRunState = {
   /** Length of text at the time of the last broadcast, used to avoid duplicate flushes. */
   deltaLastBroadcastLen: Map<string, number>;
   abortedRuns: Map<string, number>;
+  /** Media URLs (images) from assistant stream events, keyed by clientRunId. */
+  mediaUrls: Map<string, string[]>;
   clear: () => void;
 };
 
@@ -212,6 +214,7 @@ export function createChatRunState(): ChatRunState {
   const deltaSentAt = new Map<string, number>();
   const deltaLastBroadcastLen = new Map<string, number>();
   const abortedRuns = new Map<string, number>();
+  const mediaUrls = new Map<string, string[]>();
 
   const clear = () => {
     registry.clear();
@@ -219,6 +222,7 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt.clear();
     deltaLastBroadcastLen.clear();
     abortedRuns.clear();
+    mediaUrls.clear();
   };
 
   return {
@@ -227,6 +231,7 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt,
     deltaLastBroadcastLen,
     abortedRuns,
+    mediaUrls,
     clear,
   };
 }
@@ -472,7 +477,19 @@ export function createAgentEventHandler({
     chatRunState.deltaLastBroadcastLen.delete(clientRunId);
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
+    const cachedMediaUrls = chatRunState.mediaUrls.get(clientRunId);
+    chatRunState.mediaUrls.delete(clientRunId);
     if (jobState === "done") {
+      // Build content blocks: text + optional image URLs from MEDIA: directives.
+      const content: Array<Record<string, unknown>> = [];
+      if (text && !shouldSuppressSilent) {
+        content.push({ type: "text", text });
+      }
+      if (cachedMediaUrls && cachedMediaUrls.length > 0 && !shouldSuppressSilent) {
+        for (const url of cachedMediaUrls) {
+          content.push({ type: "image_url", image_url: { url } });
+        }
+      }
       const payload = {
         runId: clientRunId,
         sessionKey,
@@ -480,10 +497,10 @@ export function createAgentEventHandler({
         state: "final" as const,
         ...(stopReason && { stopReason }),
         message:
-          text && !shouldSuppressSilent
+          content.length > 0
             ? {
                 role: "assistant",
-                content: [{ type: "text", text }],
+                content,
                 timestamp: Date.now(),
               }
             : undefined,
@@ -598,6 +615,14 @@ export function createAgentEventHandler({
       }
       if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
         emitChatDelta(sessionKey, clientRunId, evt.runId, evt.seq, evt.data.text, evt.data.delta);
+        // Capture media URLs (images) from assistant stream events for the final message.
+        const evtMediaUrls = evt.data.mediaUrls;
+        if (Array.isArray(evtMediaUrls) && evtMediaUrls.length > 0) {
+          chatRunState.mediaUrls.set(
+            clientRunId,
+            evtMediaUrls.filter((u: unknown) => typeof u === "string" && u.trim()),
+          );
+        }
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         const evtStopReason =
           typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
@@ -632,6 +657,7 @@ export function createAgentEventHandler({
         chatRunState.abortedRuns.delete(evt.runId);
         chatRunState.buffers.delete(clientRunId);
         chatRunState.deltaSentAt.delete(clientRunId);
+        chatRunState.mediaUrls.delete(clientRunId);
         if (chatLink) {
           chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
         }
