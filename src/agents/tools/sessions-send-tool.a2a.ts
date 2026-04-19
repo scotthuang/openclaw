@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { CallGatewayOptions } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { isAcpSessionKey, isSubagentSessionKey } from "../../sessions/session-key-utils.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import { readLatestAssistantReply, waitForAgentRun } from "../run-wait.js";
@@ -67,10 +68,17 @@ export async function runSessionsSendA2AFlow(params: {
     });
     const targetChannel = announceTarget?.channel ?? "unknown";
 
+    // Skip ping-pong for ACP / subagent sessions – they send task results back
+    // to the parent session and should never enter a conversational back-and-forth.
+    const requesterIsAutonomous =
+      isAcpSessionKey(params.requesterSessionKey) ||
+      isSubagentSessionKey(params.requesterSessionKey);
+
     if (
       params.maxPingPongTurns > 0 &&
       params.requesterSessionKey &&
-      params.requesterSessionKey !== params.targetSessionKey
+      params.requesterSessionKey !== params.targetSessionKey &&
+      !requesterIsAutonomous
     ) {
       let currentSessionKey = params.requesterSessionKey;
       let nextSessionKey = params.targetSessionKey;
