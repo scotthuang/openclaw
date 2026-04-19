@@ -347,6 +347,7 @@ function buildMessagingSection(params: {
     "- Sub-agent orchestration → use subagents(action=list|steer|kill)",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
+    "- Messages prefixed with `[Inter-session message]` are routed from another agent session (not a human user). Treat them as task results or agent-to-agent coordination — do not reply as if the human asked a question. Process the content as context or a completed task report, and do not echo/acknowledge it back unless you have a meaningful follow-up.",
     params.availableTools.has("message")
       ? [
           "",
