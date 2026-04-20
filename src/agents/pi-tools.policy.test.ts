@@ -6,6 +6,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import {
   filterToolsByPolicy,
   isToolAllowedByPolicyName,
+  resolveAcpToolPolicy,
   resolveEffectiveToolPolicy,
   resolveSubagentToolPolicy,
   resolveSubagentToolPolicyForSession,
@@ -292,5 +293,80 @@ describe("resolveEffectiveToolPolicy", () => {
     } as OpenClawConfig;
     const result = resolveEffectiveToolPolicy({ config: cfg, agentId: "coder" });
     expect(result.profileAlsoAllow).toEqual(["read", "write", "edit"]);
+  });
+});
+
+describe("resolveAcpToolPolicy", () => {
+  const baseCfg = {} as unknown as OpenClawConfig;
+
+  it("denies sessions_send for ACP sessions (cannot message parent)", () => {
+    const policy = resolveAcpToolPolicy(baseCfg);
+    expect(isToolAllowedByPolicyName("sessions_send", policy)).toBe(false);
+  });
+
+  it("denies gateway, cron, and other always-denied tools", () => {
+    const policy = resolveAcpToolPolicy(baseCfg);
+    expect(isToolAllowedByPolicyName("gateway", policy)).toBe(false);
+    expect(isToolAllowedByPolicyName("cron", policy)).toBe(false);
+    expect(isToolAllowedByPolicyName("agents_list", policy)).toBe(false);
+    expect(isToolAllowedByPolicyName("session_status", policy)).toBe(false);
+  });
+
+  it("allows orchestrator tools (ACP sessions can spawn and manage children)", () => {
+    const policy = resolveAcpToolPolicy(baseCfg);
+    expect(isToolAllowedByPolicyName("subagents", policy)).toBe(true);
+    expect(isToolAllowedByPolicyName("sessions_spawn", policy)).toBe(true);
+    expect(isToolAllowedByPolicyName("sessions_list", policy)).toBe(true);
+    expect(isToolAllowedByPolicyName("sessions_history", policy)).toBe(true);
+  });
+
+  it("allows memory tools for ACP sessions", () => {
+    const policy = resolveAcpToolPolicy(baseCfg);
+    expect(isToolAllowedByPolicyName("memory_search", policy)).toBe(true);
+    expect(isToolAllowedByPolicyName("memory_get", policy)).toBe(true);
+  });
+
+  it("allows message tool for ACP sessions (they need to reply to the user)", () => {
+    const policy = resolveAcpToolPolicy(baseCfg);
+    expect(isToolAllowedByPolicyName("message", policy)).toBe(true);
+  });
+
+  it("honors tools.subagents.tools.alsoAllow to re-enable sessions_send", () => {
+    const cfg = {
+      tools: { subagents: { tools: { alsoAllow: ["sessions_send"] } } },
+    } as unknown as OpenClawConfig;
+    const policy = resolveAcpToolPolicy(cfg);
+    expect(isToolAllowedByPolicyName("sessions_send", policy)).toBe(true);
+  });
+
+  it("honors tools.subagents.tools.allow to re-enable sessions_send", () => {
+    const cfg = {
+      tools: { subagents: { tools: { allow: ["sessions_send"] } } },
+    } as unknown as OpenClawConfig;
+    const policy = resolveAcpToolPolicy(cfg);
+    expect(isToolAllowedByPolicyName("sessions_send", policy)).toBe(true);
+  });
+
+  it("honors explicit deny even when alsoAllow tries to re-enable", () => {
+    const cfg = {
+      tools: {
+        subagents: {
+          tools: {
+            alsoAllow: ["sessions_send"],
+            deny: ["sessions_send"],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    const policy = resolveAcpToolPolicy(cfg);
+    expect(isToolAllowedByPolicyName("sessions_send", policy)).toBe(false);
+  });
+
+  it("returns no restrictive allowlist when only alsoAllow is configured", () => {
+    const cfg = {
+      tools: { subagents: { tools: { alsoAllow: ["sessions_send"] } } },
+    } as unknown as OpenClawConfig;
+    const policy = resolveAcpToolPolicy(cfg);
+    expect(policy.allow).toBeUndefined();
   });
 });

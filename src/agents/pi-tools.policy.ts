@@ -118,6 +118,43 @@ export function resolveSubagentToolPolicyForSession(
   return { allow: mergedAllow, deny };
 }
 
+/**
+ * Tool policy for ACP (Agent Communication Protocol) sessions.
+ *
+ * ACP sessions are task-scoped child sessions spawned via the A2A protocol.
+ * They communicate results back through the ACP task lifecycle (task_completed),
+ * not via `sessions_send` to the parent. However, ACP sessions CAN spawn
+ * their own child subagents and communicate with them — they act as
+ * orchestrators, not leaf nodes.
+ *
+ * Deny list: only `SUBAGENT_TOOL_DENY_ALWAYS` (sessions_send, gateway, cron, etc.)
+ * — NOT the leaf-only deny list (subagents, sessions_spawn, sessions_list,
+ * sessions_history), since ACP sessions should be able to orchestrate children.
+ *
+ * Honors `tools.subagents.tools` config overrides so operators can
+ * selectively re-enable tools (e.g. `alsoAllow: ["sessions_send"]`)
+ * if their workflow genuinely needs ACP-to-parent messaging.
+ */
+export function resolveAcpToolPolicy(cfg?: OpenClawConfig): SandboxToolPolicy {
+  const configured = cfg?.tools?.subagents?.tools;
+  const allow = Array.isArray(configured?.allow) ? configured.allow : undefined;
+  const alsoAllow = Array.isArray(configured?.alsoAllow) ? configured.alsoAllow : undefined;
+  const explicitAllow = new Set(
+    [...(allow ?? []), ...(alsoAllow ?? [])].map((toolName) => normalizeToolName(toolName)),
+  );
+  // ACP sessions deny only the "always" list (sessions_send to parent, gateway, cron, etc.)
+  // but keep orchestrator tools (subagents, sessions_spawn, sessions_list, sessions_history)
+  // so the ACP agent can spawn and manage its own children.
+  const deny = [
+    ...resolveSubagentDenyListForRole("orchestrator").filter(
+      (toolName) => !explicitAllow.has(normalizeToolName(toolName)),
+    ),
+    ...(Array.isArray(configured?.deny) ? configured.deny : []),
+  ];
+  const mergedAllow = allow && alsoAllow ? Array.from(new Set([...allow, ...alsoAllow])) : allow;
+  return { allow: mergedAllow, deny };
+}
+
 export function filterToolsByPolicy(tools: AnyAgentTool[], policy?: SandboxToolPolicy) {
   if (!policy) {
     return tools;

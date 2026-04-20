@@ -117,4 +117,51 @@ describe("applyFinalEffectiveToolPolicy", () => {
 
     expect(warnings.some((w) => w.includes("totally-made-up-tool"))).toBe(true);
   });
+
+  it("applies subagent deny list for ACP session keys (sessions_send denied, spawn allowed)", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [
+        makeTool("sessions_send"),
+        makeTool("sessions_spawn"),
+        makeTool("subagents"),
+        makeTool("memory_search"),
+        makeTool("message"),
+      ],
+      sessionKey: "agent:main:acp:7599dc0f-5c1e-4666-a2a6-7743d488765a",
+      warn: () => {},
+    });
+
+    const names = filtered.map((tool) => tool.name);
+    // ACP sessions cannot send to parent
+    expect(names).not.toContain("sessions_send");
+    // But CAN spawn children and manage them (orchestrator role)
+    expect(names).toContain("sessions_spawn");
+    expect(names).toContain("subagents");
+    expect(names).toContain("memory_search");
+    expect(names).toContain("message");
+  });
+
+  it("does not apply subagent deny list for regular session keys", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [makeTool("sessions_send"), makeTool("memory_search")],
+      sessionKey: "agent:main:main",
+      warn: () => {},
+    });
+
+    const names = filtered.map((tool) => tool.name);
+    expect(names).toContain("sessions_send");
+    expect(names).toContain("memory_search");
+  });
+
+  it("applies subagent deny list for subagent session keys", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [makeTool("sessions_send"), makeTool("memory_search")],
+      sessionKey: "agent:main:subagent:task-abc",
+      warn: () => {},
+    });
+
+    const names = filtered.map((tool) => tool.name);
+    expect(names).not.toContain("sessions_send");
+    expect(names).toContain("memory_search");
+  });
 });

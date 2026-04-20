@@ -1,7 +1,8 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { getPluginToolMeta } from "../../plugins/tools.js";
-import { isSubagentSessionKey } from "../../routing/session-key.js";
+import { isAcpSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
 import {
+  resolveAcpToolPolicy,
   resolveEffectiveToolPolicy,
   resolveGroupContextFromSessionKey,
   resolveGroupToolPolicy,
@@ -136,7 +137,9 @@ export function applyFinalEffectiveToolPolicy(
   const subagentPolicy =
     isSubagentSessionKey(params.sessionKey) && params.sessionKey
       ? resolveSubagentToolPolicyForSession(params.config, params.sessionKey)
-      : undefined;
+      : isAcpSessionKey(params.sessionKey)
+        ? resolveAcpToolPolicy(params.config)
+        : undefined;
   const ownerFiltered = applyOwnerOnlyToolPolicy(
     params.bundledTools,
     params.senderIsOwner === true,
