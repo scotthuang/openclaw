@@ -166,6 +166,7 @@ describe("resolveCommandSecretRefsViaGateway", () => {
   function setSingleSecretTargetDeps(params: {
     path: string;
     pathSegments: readonly string[];
+    collectConfigAssignment?: boolean;
     resolveManifestContractOwnerPluginId?: NonNullable<
       Parameters<
         typeof commandSecretGatewayTesting.setDepsForTest
@@ -208,7 +209,9 @@ describe("resolveCommandSecretRefsViaGateway", () => {
         } as never;
       },
       collectConfigAssignments: ({ context }) => {
-        context.assignments.push({ path: params.path } as never);
+        if (params.collectConfigAssignment !== false) {
+          context.assignments.push({ path: params.path } as never);
+        }
       },
       discoverConfigSecretTargetsByIds: (config) =>
         [
@@ -233,10 +236,13 @@ describe("resolveCommandSecretRefsViaGateway", () => {
     });
   }
 
-  function setFirecrawlWebFetchTargetDeps(): () => void {
+  function setFirecrawlWebFetchTargetDeps(options?: {
+    collectConfigAssignment?: boolean;
+  }): () => void {
     return setSingleSecretTargetDeps({
       path: "plugins.entries.firecrawl.config.webFetch.apiKey",
       pathSegments: ["plugins", "entries", "firecrawl", "config", "webFetch", "apiKey"],
+      collectConfigAssignment: options?.collectConfigAssignment,
       resolveManifestContractOwnerPluginId: (params) =>
         params.contract === "webFetchProviders" && params.value === "firecrawl"
           ? "firecrawl"
@@ -244,15 +250,65 @@ describe("resolveCommandSecretRefsViaGateway", () => {
     });
   }
 
-  function setGoogleWebSearchTargetDeps(): () => void {
+  function setGoogleWebSearchTargetDeps(options?: {
+    collectConfigAssignment?: boolean;
+  }): () => void {
     return setSingleSecretTargetDeps({
       path: "plugins.entries.google.config.webSearch.apiKey",
       pathSegments: ["plugins", "entries", "google", "config", "webSearch", "apiKey"],
+      collectConfigAssignment: options?.collectConfigAssignment,
       resolveManifestContractOwnerPluginId: (params) =>
         params.contract === "webSearchProviders" && params.value === "gemini"
           ? "google"
           : undefined,
     });
+  }
+
+  function createRuntimeWebSecretRefFixture(params: {
+    envKey: string;
+    kind: "fetch" | "search";
+    pluginId: string;
+    providerId: string;
+  }) {
+    const pluginConfigKey = params.kind === "search" ? "webSearch" : "webFetch";
+    const path = `plugins.entries.${params.pluginId}.config.${pluginConfigKey}.apiKey`;
+    const pathSegments = [
+      "plugins",
+      "entries",
+      params.pluginId,
+      "config",
+      pluginConfigKey,
+      "apiKey",
+    ];
+    return {
+      config: {
+        tools: {
+          web: {
+            [params.kind]: {
+              provider: params.providerId,
+            },
+          },
+        },
+        plugins: {
+          entries: {
+            [params.pluginId]: {
+              config: {
+                [pluginConfigKey]: {
+                  apiKey: {
+                    source: "env",
+                    provider: "default",
+                    id: params.envKey,
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      contract: params.kind === "search" ? "webSearchProviders" : "webFetchProviders",
+      path,
+      pathSegments,
+    } as const;
   }
 
   it("returns config unchanged when no target SecretRefs are configured", async () => {
@@ -1266,6 +1322,115 @@ describe("resolveCommandSecretRefsViaGateway", () => {
     });
   });
 
+  it.each([
+    {
+      envKey: "EXTERNAL_WEB_SEARCH_PARTIAL_SNAPSHOT_KEY",
+      kind: "search",
+      pluginId: "external-search",
+      providerId: "external-search-provider",
+    },
+    {
+      envKey: "EXTERNAL_WEB_FETCH_PARTIAL_SNAPSHOT_KEY",
+      kind: "fetch",
+      pluginId: "external-fetch",
+      providerId: "external-fetch-provider",
+    },
+  ] as const)(
+    "resolves an external web $kind owner after an incomplete gateway snapshot",
+    async (test) => {
+      const fixture = createRuntimeWebSecretRefFixture(test);
+      const ownerLookup = vi.fn(
+        (params: { config?: OpenClawConfig; contract: string; origin?: string; value?: string }) =>
+          params.origin === undefined &&
+          params.contract === fixture.contract &&
+          params.value === test.providerId
+            ? test.pluginId
+            : undefined,
+      );
+      const restoreDeps = setSingleSecretTargetDeps({
+        path: fixture.path,
+        pathSegments: fixture.pathSegments,
+        collectConfigAssignment: false,
+        resolveManifestContractOwnerPluginId: ownerLookup,
+      });
+
+      try {
+        callGateway.mockResolvedValueOnce({
+          assignments: [],
+          diagnostics: [],
+        });
+        await withEnvValue(test.envKey, "external-owner-local-key", async () => {
+          const result = await resolveCommandSecretRefsViaGateway({
+            config: fixture.config,
+            commandName: "reply",
+            targetIds: new Set([fixture.path]),
+          });
+
+          expect(readPath(result.resolvedConfig, fixture.pathSegments)).toBe(
+            "external-owner-local-key",
+          );
+          expect(result.targetStatesByPath[fixture.path]).toBe("resolved_local");
+          expect(result.hadUnresolvedTargets).toBe(false);
+          expect(
+            result.diagnostics.some((entry) =>
+              entry.includes(
+                "resolved 1 secret path locally after the gateway snapshot was incomplete",
+              ),
+            ),
+          ).toBe(true);
+          expect(ownerLookup).toHaveBeenCalled();
+          expect(ownerLookup.mock.calls.every(([params]) => params.origin === undefined)).toBe(
+            true,
+          );
+        });
+      } finally {
+        restoreDeps();
+      }
+    },
+  );
+
+  it("uses external search ownership when describing an inactive target", async () => {
+    const fixture = createRuntimeWebSecretRefFixture({
+      envKey: "EXTERNAL_UNUSED_SEARCH_KEY",
+      kind: "search",
+      pluginId: "external-unused",
+      providerId: "external-selected-provider",
+    });
+    const ownerLookup = vi.fn(
+      (params: { config?: OpenClawConfig; contract: string; origin?: string; value?: string }) =>
+        params.origin === undefined &&
+        params.contract === "webSearchProviders" &&
+        params.value === "external-selected-provider"
+          ? "external-selected"
+          : undefined,
+    );
+    const restoreDeps = setSingleSecretTargetDeps({
+      path: fixture.path,
+      pathSegments: fixture.pathSegments,
+      collectConfigAssignment: false,
+      resolveManifestContractOwnerPluginId: ownerLookup,
+    });
+    try {
+      callGateway.mockResolvedValueOnce({
+        assignments: [],
+        diagnostics: [],
+      });
+      const result = await resolveCommandSecretRefsViaGateway({
+        config: fixture.config,
+        commandName: "reply",
+        targetIds: new Set([fixture.path]),
+      });
+
+      expect(result.targetStatesByPath[fixture.path]).toBe("inactive_surface");
+      expect(result.diagnostics).toContain(
+        `${fixture.path}: tools.web.search.provider is "external-selected-provider".`,
+      );
+      expect(ownerLookup.mock.calls.every(([params]) => params.origin === undefined)).toBe(true);
+    } finally {
+      restoreDeps();
+    }
+  });
+
   it("accepts an inactive web ref after an incomplete gateway snapshot", async () => {
     const restoreDeps = setGoogleWebSearchTargetDeps();
     const webPath = "plugins.entries.google.config.webSearch.apiKey";
@@ -1318,9 +1483,10 @@ describe("resolveCommandSecretRefsViaGateway", () => {
 
   it.each([
     {
+      envKey: "ACTIVE_UNKNOWN_WEB_SEARCH_REF",
       label: "search",
       path: "plugins.entries.google.config.webSearch.apiKey",
-      setupDeps: setGoogleWebSearchTargetDeps,
+      setupDeps: () => setGoogleWebSearchTargetDeps({ collectConfigAssignment: false }),
       config: {
         tools: { web: { search: { provider: "unregistered-provider" } } },
         plugins: {
@@ -1331,7 +1497,7 @@ describe("resolveCommandSecretRefsViaGateway", () => {
                   apiKey: {
                     source: "env",
                     provider: "default",
-                    id: "missing-active-web-search-ref",
+                    id: "ACTIVE_UNKNOWN_WEB_SEARCH_REF",
                   },
                 },
               },
@@ -1341,9 +1507,10 @@ describe("resolveCommandSecretRefsViaGateway", () => {
       } as OpenClawConfig,
     },
     {
+      envKey: "ACTIVE_UNKNOWN_WEB_FETCH_REF",
       label: "fetch",
       path: "plugins.entries.firecrawl.config.webFetch.apiKey",
-      setupDeps: setFirecrawlWebFetchTargetDeps,
+      setupDeps: () => setFirecrawlWebFetchTargetDeps({ collectConfigAssignment: false }),
       config: {
         tools: { web: { fetch: { provider: "unregistered-provider" } } },
         plugins: {
@@ -1354,7 +1521,7 @@ describe("resolveCommandSecretRefsViaGateway", () => {
                   apiKey: {
                     source: "env",
                     provider: "default",
-                    id: "missing-active-web-fetch-ref",
+                    id: "ACTIVE_UNKNOWN_WEB_FETCH_REF",
                   },
                 },
               },
@@ -1370,13 +1537,15 @@ describe("resolveCommandSecretRefsViaGateway", () => {
         assignments: [],
         diagnostics: [],
       });
-      await expect(
-        resolveCommandSecretRefsViaGateway({
-          config: test.config,
-          commandName: "agent",
-          targetIds: new Set([test.path]),
-        }),
-      ).rejects.toThrow(`${test.path} is unresolved in the active runtime snapshot`);
+      await withEnvValue(test.envKey, "present-but-unowned", async () => {
+        await expect(
+          resolveCommandSecretRefsViaGateway({
+            config: test.config,
+            commandName: "agent",
+            targetIds: new Set([test.path]),
+          }),
+        ).rejects.toThrow(`${test.path} is unresolved in the active runtime snapshot`);
+      });
     } finally {
       restoreDeps();
     }

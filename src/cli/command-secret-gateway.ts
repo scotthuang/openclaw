@@ -171,7 +171,6 @@ function classifyRuntimeWebTargetPathState(params: {
       const configuredPluginId = commandSecretGatewayDeps.resolveManifestContractOwnerPluginId({
         contract: "webFetchProviders",
         value: configuredProvider,
-        origin: "bundled",
         config: params.config,
       });
       if (!configuredPluginId) {
@@ -190,7 +189,6 @@ function classifyRuntimeWebTargetPathState(params: {
     const configuredPluginId = commandSecretGatewayDeps.resolveManifestContractOwnerPluginId({
       contract: "webSearchProviders",
       value: configuredProvider,
-      origin: "bundled",
       config: params.config,
     });
     if (!configuredPluginId) {
@@ -228,7 +226,6 @@ function describeInactiveRuntimeWebTargetPath(params: {
       ? commandSecretGatewayDeps.resolveManifestContractOwnerPluginId({
           contract: "webSearchProviders",
           value: configuredProvider,
-          origin: "bundled",
           config: params.config,
         })
       : undefined;
