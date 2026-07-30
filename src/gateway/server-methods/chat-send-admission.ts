@@ -6,6 +6,7 @@ import { isReplyRunAbortableForSignal } from "../../auto-reply/reply/reply-run-r
 import { resolveSessionWorkStartError } from "../../config/sessions.js";
 import { SESSION_ROUTING_CHANGED_ERROR_REASON } from "../../config/sessions/main-session.js";
 import {
+  readSessionTranscriptActivePathEntryState,
   readSessionTranscriptActiveLeafEvents,
   resolveSessionTranscriptActiveLeafEntryId,
 } from "../../config/sessions/session-accessor.js";
@@ -194,22 +195,51 @@ export async function admitChatSend(params: {
       throw new Error(`Session "${sessionKey}" was deleted while starting work. Retry.`);
     }
     if (commitOutcome && expectedLeafEntryId !== undefined) {
+      const latestSessionId = latestEntry?.sessionId;
+      const expectedSessionId = requestedSessionId ?? backingSessionId;
+      // Branch navigation rotates the backing transcript. Check the pane's rendered
+      // generation before ancestry because a copied branch can retain the old leaf.
+      if (expectedSessionId && latestSessionId && expectedSessionId !== latestSessionId) {
+        throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
+      }
       // Runtime session identity resolves through the canonical SQLite accessor;
       // legacy/reset-archive files are read-only history fallbacks, never send targets.
-      const currentLeafEntryId = latestEntry?.sessionId
-        ? resolveSessionTranscriptActiveLeafEntryId(
-            readSessionTranscriptActiveLeafEvents({
-              agentId,
-              sessionId: latestEntry.sessionId,
-              sessionKey: latestSession.canonicalKey,
-              sessionEntry: latestEntry,
-              storePath: latestSession.storePath,
-            }),
-          )
-        : undefined;
+      const activePathState =
+        latestSessionId && expectedLeafEntryId !== null
+          ? readSessionTranscriptActivePathEntryState(
+              {
+                agentId,
+                sessionId: latestSessionId,
+                sessionKey: latestSession.canonicalKey,
+                sessionEntry: latestEntry,
+                storePath: latestSession.storePath,
+              },
+              expectedLeafEntryId,
+            )
+          : undefined;
+      const currentLeafEntryId = activePathState
+        ? activePathState.activeLeafEntryId
+        : latestSessionId
+          ? resolveSessionTranscriptActiveLeafEntryId(
+              readSessionTranscriptActiveLeafEvents({
+                agentId,
+                sessionId: latestSessionId,
+                sessionKey: latestSession.canonicalKey,
+                sessionEntry: latestEntry,
+                storePath: latestSession.storePath,
+              }),
+            )
+          : undefined;
       // The lifecycle admission fence also blocks branch switching. Check the canonical
       // transcript under that fence so a stale pane cannot dispatch onto another branch.
-      if ((currentLeafEntryId ?? null) !== expectedLeafEntryId) {
+      // A same-generation ancestor only proves linear progress on the selected path;
+      // callers without a rendered session generation retain exact-leaf semantics.
+      const acceptsSameBranchAdvance =
+        expectedLeafEntryId !== null &&
+        requestedSessionId !== undefined &&
+        requestedSessionId === latestSessionId &&
+        activePathState?.entryOnActivePath === true;
+      if ((currentLeafEntryId ?? null) !== expectedLeafEntryId && !acceptsSameBranchAdvance) {
         throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
       }
     }
