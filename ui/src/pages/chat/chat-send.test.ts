@@ -3663,9 +3663,11 @@ describe("handleSendChat", () => {
       requestHandlers: {
         "chat.send": { status: "started", runId: "steer-run" },
       },
+      chatDisplayedLeafEntryId: "leaf-before-steer",
       chatMessage: "tighten the plan",
       chatRunId: "run-1",
       chatStream: "Working...",
+      currentSessionId: "session-before-steer",
       sessionKey: "agent:main:main",
       settings: { chatFollowUpMode: "steer" },
     });
@@ -3680,6 +3682,8 @@ describe("handleSendChat", () => {
           message: "tighten the plan",
           deliver: false,
           queueMode: "steer",
+          expectedLeafEntryId: "leaf-before-steer",
+          sessionId: "session-before-steer",
         }),
       ),
     );
@@ -7233,6 +7237,7 @@ describe("handleSendChat", () => {
         },
       },
       chatDisplayedLeafEntryId: "leaf-rendered",
+      currentSessionId: "session-rendered",
       chatBranches: [],
       chatBranchesSessionKey: "agent:main",
       chatBranchesConnectionEpoch: 0,
@@ -7250,7 +7255,77 @@ describe("handleSendChat", () => {
 
     expect(
       findRequestPayload(host.request as unknown as MockCallSource, "chat.send", "foreground send"),
-    ).toMatchObject({ expectedLeafEntryId: "leaf-rendered" });
+    ).toMatchObject({
+      expectedLeafEntryId: "leaf-rendered",
+      sessionId: "session-rendered",
+    });
+  });
+
+  it("keeps the rendered session and leaf paired across an async settings wait", async () => {
+    const settingsPatch = createDeferred<boolean>();
+    const host = makeHost({
+      requestHandlers: {
+        "chat.send": (params: unknown) => {
+          const payload = requireRecord(params, "settings-delayed send payload");
+          return { runId: payload.idempotencyKey, status: "started" };
+        },
+      },
+      chatDisplayedLeafEntryId: "leaf-before-switch",
+      chatMessage: "stay on the rendered branch",
+      currentSessionId: "session-before-switch",
+      pendingSettingsPatches: { "agent:main": settingsPatch.promise },
+    });
+
+    const send = handleSendChat(host);
+    expect(await raceWithMacrotask(send)).toBe("pending");
+    expect(host.chatQueue[0]?.transcriptRevision).toEqual({
+      expectedLeafEntryId: "leaf-before-switch",
+      sessionId: "session-before-switch",
+    });
+
+    host.currentSessionId = "session-after-switch";
+    settingsPatch.resolve(true);
+    await send;
+
+    expect(
+      findRequestPayload(
+        host.request as unknown as MockCallSource,
+        "chat.send",
+        "settings-delayed send",
+      ),
+    ).toMatchObject({
+      expectedLeafEntryId: "leaf-before-switch",
+      sessionId: "session-before-switch",
+    });
+  });
+
+  it("does not pair a captured leaf with a session discovered after submit", async () => {
+    const settingsPatch = createDeferred<boolean>();
+    const host = makeHost({
+      requestHandlers: {
+        "chat.send": (params: unknown) => {
+          const payload = requireRecord(params, "generation-delayed send payload");
+          return { runId: payload.idempotencyKey, status: "started" };
+        },
+      },
+      chatDisplayedLeafEntryId: "leaf-before-session",
+      chatMessage: "keep the leaf without borrowing a generation",
+      pendingSettingsPatches: { "agent:main": settingsPatch.promise },
+    });
+
+    const send = handleSendChat(host);
+    expect(await raceWithMacrotask(send)).toBe("pending");
+    host.currentSessionId = "session-discovered-later";
+    settingsPatch.resolve(true);
+    await send;
+
+    const payload = findRequestPayload(
+      host.request as unknown as MockCallSource,
+      "chat.send",
+      "generation-delayed send",
+    );
+    expect(payload.expectedLeafEntryId).toBe("leaf-before-session");
+    expect(payload).not.toHaveProperty("sessionId");
   });
 
   it("attaches an authoritative empty displayed leaf to a foreground send", async () => {
@@ -7272,7 +7347,7 @@ describe("handleSendChat", () => {
     ).toHaveProperty("expectedLeafEntryId", null);
   });
 
-  it("omits the active leaf when draining a restored outbox", async () => {
+  it("retains the rendered revision when draining a restored outbox", async () => {
     const host = makeHost({
       client: null,
       connected: false,
@@ -7282,8 +7357,13 @@ describe("handleSendChat", () => {
       ],
       chatBranchesSessionKey: "agent:main",
       chatMessage: "send after reconnect",
+      currentSessionId: "session-before-reconnect",
     });
     await handleSendChat(host);
+    expect(host.chatQueue[0]?.transcriptRevision).toEqual({
+      expectedLeafEntryId: "leaf-current",
+      sessionId: "session-before-reconnect",
+    });
 
     const request = makeRequestMock({
       "chat.history": idleChatHistory(),
@@ -7294,12 +7374,53 @@ describe("handleSendChat", () => {
     });
     host.client = clientWithRequest(request);
     host.connected = true;
+    host.currentSessionId = "session-after-branch-switch";
 
     await retryReconnectableQueuedChatSends(host);
 
     expect(
       findRequestPayload(request as unknown as MockCallSource, "chat.send", "restored send"),
-    ).not.toHaveProperty("expectedLeafEntryId");
+    ).toMatchObject({
+      expectedLeafEntryId: "leaf-current",
+      sessionId: "session-before-reconnect",
+    });
+  });
+
+  it("keeps legacy restored outbox rows without a branch precondition", async () => {
+    const request = makeRequestMock({
+      "chat.history": idleChatHistory(),
+      "chat.send": (params: unknown) => {
+        const payload = requireRecord(params, "legacy restored send payload");
+        return { runId: payload.idempotencyKey, status: "ok" };
+      },
+    });
+    const host = makeHost({
+      client: clientWithRequest(request),
+      connected: true,
+      currentSessionId: "session-current",
+      chatQueue: [
+        {
+          id: "legacy-restored",
+          text: "legacy queued message",
+          createdAt: 1,
+          sendAttempts: 0,
+          sendRunId: "legacy-restored-run",
+          sendState: "waiting-reconnect",
+          sessionKey: "agent:main",
+        },
+      ],
+    });
+    admitHostQueueItems(host);
+
+    await retryReconnectableQueuedChatSends(host);
+
+    const payload = findRequestPayload(
+      request as unknown as MockCallSource,
+      "chat.send",
+      "legacy restored send",
+    );
+    expect(payload).not.toHaveProperty("expectedLeafEntryId");
+    expect(payload.sessionId).toBe("session-current");
   });
 
   it("preserves a foreground leaf past an earlier outbox row", async () => {
@@ -7341,14 +7462,20 @@ describe("handleSendChat", () => {
   });
 
   it("parks an active-leaf rejection, restores the draft, and refreshes branch state", async () => {
+    let sendAttempts = 0;
     const host = makeHost({
       requestHandlers: {
-        "chat.send": () => {
-          throw new GatewayRequestError({
-            code: "INVALID_REQUEST",
-            message: "active branch changed; review and resend",
-            details: { reason: "active-leaf-changed" },
-          });
+        "chat.send": (params: unknown) => {
+          sendAttempts += 1;
+          if (sendAttempts === 1) {
+            throw new GatewayRequestError({
+              code: "INVALID_REQUEST",
+              message: "active branch changed; review and resend",
+              details: { reason: "active-leaf-changed" },
+            });
+          }
+          const payload = requireRecord(params, "retried branch send payload");
+          return { runId: payload.idempotencyKey, status: "started" };
         },
         "chat.history": idleChatHistory(),
         "sessions.branches.list": { branches: [] },
@@ -7359,6 +7486,7 @@ describe("handleSendChat", () => {
       ],
       chatBranchesSessionKey: "agent:main",
       chatMessage: "stale branch prompt",
+      currentSessionId: "session-before-switch",
     });
 
     await handleSendChat(host);
@@ -7380,6 +7508,19 @@ describe("handleSendChat", () => {
       }),
     ]);
     expect(host.request.mock.calls.filter(([method]) => method === "chat.send")).toHaveLength(1);
+
+    host.chatDisplayedLeafEntryId = "leaf-after-switch";
+    host.currentSessionId = "session-after-switch";
+    await retryQueuedChatMessage(host, host.chatQueue[0]!.id);
+
+    const sends = host.request.mock.calls
+      .filter(([method]) => method === "chat.send")
+      .map(([, params]) => requireRecord(params, "branch send payload"));
+    expect(sends).toHaveLength(2);
+    expect(sends[1]).toMatchObject({
+      expectedLeafEntryId: "leaf-after-switch",
+      sessionId: "session-after-switch",
+    });
   });
 
   it("marks validation failures visible and restores the composer", async () => {
@@ -7823,14 +7964,24 @@ describe("handleSendChat", () => {
   });
 
   it("steers a queued message into the active run without replacing run tracking", async () => {
-    const original = { id: "queued-1", text: "tighten the plan", createdAt: 1 };
+    const original = {
+      id: "queued-1",
+      text: "tighten the plan",
+      createdAt: 1,
+      transcriptRevision: {
+        expectedLeafEntryId: "leaf-queued",
+        sessionId: "session-queued",
+      },
+    };
     const host = makeHost({
       requestHandlers: {
         "chat.send": { status: "started", runId: "steer-run" },
       },
+      chatDisplayedLeafEntryId: "leaf-live",
       chatRunId: "run-1",
       chatStream: "Working...",
       chatQueue: [original],
+      currentSessionId: "session-live",
       sessionKey: "agent:main:main",
     });
     expect(admitQueuedMessageForSession(host, host.sessionKey, original)).toBe(true);
@@ -7850,6 +8001,8 @@ describe("handleSendChat", () => {
       message: "tighten the plan",
       deliver: false,
       queueMode: "steer",
+      sessionId: "session-queued",
+      expectedLeafEntryId: "leaf-queued",
       idempotencyKey,
       attachments: undefined,
     });
