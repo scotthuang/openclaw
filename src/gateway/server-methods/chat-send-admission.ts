@@ -207,17 +207,19 @@ export async function admitChatSend(params: {
       replyRunRegistry.isStreamingFromOriginatingLeaf(activeRunScopeKey, expectedLeafEntryId);
     if (commitOutcome && expectedLeafEntryId !== undefined) {
       const latestSessionId = latestEntry?.sessionId;
-      const expectedSessionId = requestedSessionId ?? backingSessionId;
-      // Branch navigation rotates the backing transcript. Check the pane's rendered
-      // generation before ancestry because a copied branch can retain the old leaf.
-      if (expectedSessionId && latestSessionId && expectedSessionId !== latestSessionId) {
+      const initialSessionId = requestedSessionId ?? backingSessionId;
+      // Reject backing transcript rotation before ancestry; a copied branch can retain
+      // the old leaf. The stored fallback protects only this fence, not ancestor access.
+      if (initialSessionId && latestSessionId && initialSessionId !== latestSessionId) {
         throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
       }
+      const requestedSessionMatchesLatest =
+        requestedSessionId !== undefined && requestedSessionId === latestSessionId;
       if (!hasActiveSteeringOwner) {
         // Runtime session identity resolves through the canonical SQLite accessor;
         // legacy/reset-archive files are read-only history fallbacks, never send targets.
         const activePathState =
-          latestSessionId && expectedLeafEntryId !== null
+          requestedSessionMatchesLatest && latestSessionId && expectedLeafEntryId !== null
             ? readSessionTranscriptActivePathEntryState(
                 {
                   agentId,
@@ -248,8 +250,7 @@ export async function admitChatSend(params: {
         // callers without a rendered session generation retain exact-leaf semantics.
         const acceptsSameBranchAdvance =
           expectedLeafEntryId !== null &&
-          requestedSessionId !== undefined &&
-          requestedSessionId === latestSessionId &&
+          requestedSessionMatchesLatest &&
           activePathState?.entryOnActivePath === true;
         if ((currentLeafEntryId ?? null) !== expectedLeafEntryId && !acceptsSameBranchAdvance) {
           throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
