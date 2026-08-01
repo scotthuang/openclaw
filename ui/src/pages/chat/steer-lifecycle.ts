@@ -1,7 +1,11 @@
 import type { QueueMode } from "../../../../src/auto-reply/reply/queue/types.js";
 import type { SessionsListResult } from "../../api/types.ts";
 import { setLastActiveSessionKey } from "../../app/settings.ts";
-import type { ChatAttachment, ChatQueueItem } from "../../lib/chat/chat-types.ts";
+import type {
+  ChatAttachment,
+  ChatQueueItem,
+  ChatTranscriptRevision,
+} from "../../lib/chat/chat-types.ts";
 import { visibleSessionMatches } from "../../lib/sessions/index.ts";
 import { generateUUID } from "../../lib/uuid.ts";
 import {
@@ -54,7 +58,12 @@ export type SteerSendDependencies = {
     host: SteerLifecycleHost,
     message: string,
     attachments: ChatAttachment[] | undefined,
-    options: { canApplyError: () => boolean; queueMode?: QueueMode; runId: string },
+    options: {
+      canApplyError: () => boolean;
+      queueMode?: QueueMode;
+      runId: string;
+      transcriptRevision?: ChatTranscriptRevision;
+    },
   ) => Promise<ChatSendAck | null>;
 };
 
@@ -275,6 +284,7 @@ export async function sendQueuedChatMessageWithQueueMode(
     sendRunId: claimed.sendRunId,
     sessionKey: claimed.sessionKey,
     agentId: claimed.agentId,
+    transcriptRevision: claimed.transcriptRevision,
   };
   const steeringChip = buildInflightSteerChip(pendingItem, claimed.sendRunId, activeRunId);
   const pendingIndicator = isSteer
@@ -305,6 +315,7 @@ export async function sendQueuedChatMessageWithQueueMode(
       canApplyError: () => visibleSessionMatches(host, itemSessionKey, item.agentId),
       ...(queueMode ? { queueMode } : {}),
       runId: claimed.sendRunId,
+      ...(claimed.transcriptRevision ? { transcriptRevision: claimed.transcriptRevision } : {}),
     },
   );
   if (isSteer && activeRunId) {
