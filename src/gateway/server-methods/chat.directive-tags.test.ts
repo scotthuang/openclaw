@@ -1402,7 +1402,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     expect(loadTranscriptEventsSync(transcriptScope())).toEqual(before);
   });
 
-  it("keeps exact-leaf behavior when the client omits its session generation", async () => {
+  it("rejects an active-path ancestor when the client omits sessionId", async () => {
     await createGatewayUserTurnSqliteFixture("openclaw-chat-send-ancestor-no-session-");
     await appendTranscriptMessage(transcriptScope(), {
       eventId: "displayed-leaf",
@@ -1416,6 +1416,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       now: 2,
       parentId: "displayed-leaf",
     });
+    const before = loadTranscriptEventsSync(transcriptScope());
     const { context, respond, send } = createChatRequestFixture();
 
     await send({
@@ -1430,6 +1431,8 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       expect.objectContaining({ details: { reason: "active-leaf-changed" } }),
     ]);
     expect(context.addChatRun).not.toHaveBeenCalled();
+    expect(mockState.lastDispatchCtx).toBeUndefined();
+    expect(loadTranscriptEventsSync(transcriptScope())).toEqual(before);
   });
 
   it("rejects a stale rendered session even when its leaf id still matches", async () => {
