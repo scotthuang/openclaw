@@ -1,0 +1,28 @@
+{
+  "headSha": "9d8da6ec433cfe99857733fbba9b8d32409127ab",
+  "startedAt": "2026-08-05T06:08:18.732Z",
+  "status": "pass",
+  "sameBranchBackgroundAppend": {
+    "backgroundLeafEntryId": "pr-116382-leaf-after-background",
+    "expectedLeafEntryIdSent": "pr-116382-leaf-before-background",
+    "historyRefreshInFlight": true,
+    "renderedReply": "Same-branch send accepted.",
+    "requestSessionId": "pr-116382-generation-before-switch",
+    "status": "pass"
+  },
+  "restoredQueuedBranchSwitch": {
+    "activeLeafAfterSwitch": "pr-116382-leaf-after-switch",
+    "activeSessionAfterSwitch": "pr-116382-generation-after-switch",
+    "expectedLeafEntryIdSent": "pr-116382-leaf-before-background",
+    "parkedState": "failed",
+    "requestSessionId": "pr-116382-generation-before-switch",
+    "storedRevisionAfterReload": {
+      "expectedLeafEntryId": "pr-116382-leaf-before-background",
+      "sessionId": "pr-116382-generation-before-switch"
+    },
+    "visibleError": "The thread switched branches — review and resend.",
+    "visibleState": "Failed",
+    "status": "pass"
+  },
+  "finishedAt": "2026-08-05T06:10:16.718Z"
+}
