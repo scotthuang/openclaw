@@ -4,6 +4,7 @@
 - Base used for the rebase: `72fd25d47d1d5ae772de8af052623cc869bf2af0`
 - Browser: Google Chrome via Playwright, 1280 x 900
 - Gateway: repository Control UI E2E mocked-Gateway harness
+- Published harness: `ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts` on this proof branch only
 - Result: 1 test passed in 125.99 seconds
 
 ## Scenarios
@@ -34,4 +35,5 @@ f923dd0107734a5c4dbe3890e66db4f9b74a500a4f58d9cc0cbd46d23f27f356  01-same-branch
 fa94d3f9f69e1fd9de6a293b25032debceb1a62f3c97781086999d54734db065  02-restored-cross-branch-needs-review.webm
 402af54f3d4847bd477672cc50bd313494679c909be92f2e15235dbae7f3be92  03-restored-cross-branch-needs-review.png
 c9cc174117a858ffaae377d2ec52f57891014e2c0eb39a0d3376555492e1550f  pr-116382-exact-head-proof.json
+8bf3af10790a36ff9d6ce4d3024020699dad20d2a32382ef35247686e9d77b9f  ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts
 ```
