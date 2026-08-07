@@ -38,6 +38,21 @@ on:
         required: false
         default: ""
         type: string
+      exact_ui_proof:
+        description: "Run only the temporary PR #116382 exact-head Control UI evidence job."
+        required: false
+        default: false
+        type: boolean
+      exact_ui_proof_head:
+        description: Exact PR head SHA required by the temporary Control UI evidence job.
+        required: false
+        default: ""
+        type: string
+      exact_ui_proof_base:
+        description: Exact PR base SHA required by the temporary Control UI evidence job.
+        required: false
+        default: ""
+        type: string
   push:
     branches: [main]
     paths-ignore:
@@ -61,12 +76,806 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  exact-ui-proof:
+    permissions:
+      contents: read
+    if: github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof
+    name: "PR #116382 exact-head Control UI proof"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout evidence tip
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact candidate, base, and evidence-only delta
+        env:
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_BASE: ${{ inputs.exact_ui_proof_base }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_BASE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_HEAD" == "e016032cf4746c0c220966108df29ae87fe7db7e" ]]
+          [[ "$EXPECTED_BASE" == "1f15bc92f90353bd6a7327e149cb5dddf0a17bd1" ]]
+
+          actual_tip="$(git rev-parse HEAD)"
+          actual_parent="$(git rev-parse HEAD^)"
+          merge_base="$(git merge-base "$EXPECTED_BASE" "$EXPECTED_HEAD")"
+          upstream_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+
+          [[ "$actual_tip" == "$EVIDENCE_SHA" ]]
+          [[ "$actual_parent" == "$EXPECTED_HEAD" ]]
+          [[ "$merge_base" == "$EXPECTED_BASE" ]]
+          [[ "$upstream_head" == "$EXPECTED_HEAD" ]]
+
+          mapfile -t changed_files < <(git diff --name-only "$EXPECTED_HEAD"..HEAD | sort)
+          expected_files=(
+            ".github/workflows/ci.yml"
+            "ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts"
+          )
+          mapfile -t expected_files < <(printf '%s\n' "${expected_files[@]}" | sort)
+          diff -u <(printf '%s\n' "${expected_files[@]}") <(printf '%s\n' "${changed_files[@]}")
+
+          {
+            echo "### Exact-head identity"
+            echo
+            echo "- Candidate: \`$EXPECTED_HEAD\`"
+            echo "- Base / merge-base: \`$EXPECTED_BASE\`"
+            echo "- Evidence tip: \`$EVIDENCE_SHA\`"
+            echo "- Upstream PR ref matched candidate: yes"
+            echo "- Evidence-only paths: 2"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          sticky-disk: "false"
+          use-actions-cache: "false"
+
+      - name: Install Playwright Chromium
+        run: node scripts/ensure-playwright-chromium.mjs
+
+      - name: Prepare proof output
+        shell: bash
+        run: mkdir -p .artifacts/control-ui-e2e/pr-116382-exact-head
+
+      - name: Run four real-Gateway browser scenarios
+        id: browser
+        continue-on-error: true
+        env:
+          OPENCLAW_PR_116382_BASE: ${{ inputs.exact_ui_proof_base }}
+          OPENCLAW_PR_116382_EVIDENCE_SHA: ${{ github.sha }}
+          OPENCLAW_PR_116382_HEAD: ${{ inputs.exact_ui_proof_head }}
+          OPENCLAW_PR_116382_PROOF_DIR: .artifacts/control-ui-e2e/pr-116382-exact-head
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui-e2e.config.ts \
+            --configLoader runner \
+            ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts \
+            2>&1 | tee .artifacts/control-ui-e2e/pr-116382-exact-head/browser-vitest.log
+
+      - name: Run focused owner-boundary tests
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          focused_tests=(
+            packages/gateway-protocol/src/schema/logs-chat.test.ts
+            src/auto-reply/reply/reply-run-registry.test.ts
+            src/config/sessions/session-accessor.sqlite-active-events.test.ts
+            src/config/sessions/session-accessor.sqlite-idless-boundaries.test.ts
+            src/gateway/managed-image-attachments.test.ts
+            src/gateway/session-transcript-readers.test.ts
+            src/gateway/session-transcript-readers.reset-archive.test.ts
+            src/gateway/server-methods/chat.directive-tags.test.ts
+            src/gateway/server.chat.gateway-server-chat-b.test.ts
+            src/state/sqlite-query-plan.test.ts
+            ui/src/lib/chat/outbox-store.test.ts
+            ui/src/pages/chat/chat-gateway.test.ts
+            ui/src/pages/chat/chat-command-executor.test.ts
+            ui/src/pages/chat/chat-send.test.ts
+            ui/src/pages/chat/composer-persistence.test.ts
+          )
+          [[ "${#focused_tests[@]}" -eq 15 ]]
+          node scripts/run-vitest.mjs "${focused_tests[@]}" \
+            2>&1 | tee .artifacts/control-ui-e2e/pr-116382-exact-head/focused-vitest.log
+
+      - name: Verify and index browser media
+        id: media
+        if: always()
+        continue-on-error: true
+        env:
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_BASE: ${{ inputs.exact_ui_proof_base }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.artifacts/control-ui-e2e/pr-116382-exact-head
+          verdict="$artifact_dir/pr-116382-exact-head-proof.json"
+
+          test -f "$verdict"
+          [[ "$(jq -r '.status' "$verdict")" == "pass" ]]
+          [[ "$(jq -r '.headSha' "$verdict")" == "$EXPECTED_HEAD" ]]
+          [[ "$(jq -r '.baseSha' "$verdict")" == "$EXPECTED_BASE" ]]
+          [[ "$(jq -r '.evidenceTipSha' "$verdict")" == "$EVIDENCE_SHA" ]]
+          [[ "$(jq -r '.dataClassification' "$verdict")" == "synthetic-redacted" ]]
+          [[ "$(jq -r '.gatewayMode' "$verdict")" == "real-ephemeral-process" ]]
+          [[ "$(jq -r '.mockGateway' "$verdict")" == "false" ]]
+          [[ -n "$(jq -r '.proofSessionKey // empty' "$verdict")" ]]
+          [[ "$(jq -r '.providerBoundary' "$verdict")" == "synthetic-local-http" ]]
+          [[ "$(jq -r '.websocket' "$verdict")" == "real-browser-native" ]]
+          jq -e '
+            def nonempty: type == "string" and length > 0;
+            .headSha == "e016032cf4746c0c220966108df29ae87fe7db7e" and
+            .baseSha == "1f15bc92f90353bd6a7327e149cb5dddf0a17bd1" and
+            .sameBranchBackgroundAppend.status == "pass" and
+            .restoredQueuedBranchSwitch.status == "pass" and
+            .resetBoundaryGuardedRetry.status == "pass" and
+            .exactRunSteerSameRun.status == "pass" and
+            (.exactRunSteerSameRun as $steer |
+              ($steer.queueModeSent | nonempty) and
+              ($steer.expectedRunIdSent | nonempty) and
+              ($steer.targetRunId | nonempty) and
+              ($steer.steerClientRunId | nonempty) and
+              ($steer.requestSessionKey | nonempty) and
+              ($steer.slashCommandSent | nonempty) and
+              ($steer.renderedLeaf | nonempty) and
+              ($steer.activeLeafBeforeSteer | nonempty) and
+              ($steer.activeLeafWhileSteeredResponseHeld | nonempty) and
+              ($steer.browserDisplayedLeafBeforeDrift | nonempty) and
+              ($steer.browserSessionLeafBeforeDrift | nonempty) and
+              ($steer.browserHistoryRefresh.requestId | nonempty) and
+              ($steer.terminalBrowserHistoryRefresh.requestId | nonempty) and
+              ($steer.terminalBrowserHistoryRefresh.activeLeafEntryId | nonempty) and
+              ($steer.expectedLeafEntryIdSent | nonempty) and
+              ($steer.paneRunIdAfterDrift | nonempty) and
+              ($steer.visibleReply | nonempty) and
+              ($steer.providerRequestsBeforeRun | type == "number") and
+              ($steer.providerRequestsBeforeInitialRelease | type == "number") and
+              ($steer.providerRequestsWhileSteeredResponseHeld | type == "number") and
+              ($steer.providerRequestsAfterCompletion | type == "number") and
+              $steer.queueModeSent == "steer" and
+              $steer.deliverSent == false and
+              ($steer.slashCommandSent | startswith("/steer ")) and
+              $steer.requestSessionKey == .proofSessionKey and
+              $steer.expectedRunIdSent == $steer.targetRunId and
+              $steer.initialAckRunId == $steer.targetRunId and
+              $steer.steerClientRunId != $steer.targetRunId and
+              $steer.paneRunIdAfterDrift != $steer.targetRunId and
+              $steer.expectedLeafEntryIdSent == $steer.renderedLeaf and
+              $steer.browserDisplayedLeafBeforeDrift == $steer.activeLeafBeforeSteer and
+              $steer.browserSessionLeafBeforeDrift == $steer.activeLeafBeforeSteer and
+              $steer.browserHistoryRefresh.responseOk == true and
+              $steer.browserHistoryRefresh.transport == "browser-native-websocket" and
+              $steer.browserHistoryRefresh.displayedLeafEntryId ==
+                $steer.activeLeafBeforeSteer and
+              $steer.browserHistoryRefresh.activeRunIds == [$steer.targetRunId] and
+              $steer.terminalBrowserHistoryRefresh.responseOk == true and
+              $steer.terminalBrowserHistoryRefresh.transport == "browser-native-websocket" and
+              $steer.terminalBrowserHistoryRefresh.activeRunIds == [] and
+              $steer.terminalBrowserHistoryRefresh.activeLeafEntryId ==
+                $steer.terminalBrowserHistoryRefresh.displayedLeafEntryId and
+              $steer.terminalBrowserHistoryRefresh.paneRunIdBeforeRefresh ==
+                $steer.paneRunIdAfterDrift and
+              $steer.terminalBrowserHistoryRefresh.paneRunIdAfterRefresh == null and
+              $steer.terminalBrowserHistoryRefresh.pendingAfterRefresh == null and
+              $steer.terminalBrowserHistoryRefresh.pendingClearedBeforeRefresh == true and
+              $steer.terminalBrowserHistoryRefresh.replyVisibleBeforeRefresh == true and
+              $steer.terminalBrowserHistoryRefresh.replyVisibleAfterRefresh == true and
+              $steer.paneRunIdBeforeTerminalRefresh == $steer.paneRunIdAfterDrift and
+              $steer.paneRunIdAfterCompletion == null and
+              $steer.renderedLeaf != $steer.activeLeafBeforeSteer and
+              $steer.activeLeafBeforeSteer !=
+                $steer.activeLeafWhileSteeredResponseHeld and
+              $steer.gatewayAcceptedSteer == true and
+              $steer.gatewaySteerStatus == "started" and
+              $steer.staleLeafBypassedByExactRun == true and
+              $steer.pendingClearedAfterTargetCompletion == true and
+              $steer.pendingOwnershipBeforeInitialRelease.kind == "steered" and
+              $steer.pendingOwnershipBeforeInitialRelease.text ==
+                $steer.slashCommandSent and
+              $steer.pendingOwnershipBeforeInitialRelease.pendingRunId ==
+                $steer.targetRunId and
+              $steer.pendingOwnershipBeforeInitialRelease.steerTargetRunId ==
+                $steer.targetRunId and
+              $steer.pendingOwnershipWhileSteeredResponseHeld ==
+                $steer.pendingOwnershipBeforeInitialRelease and
+              $steer.activeRunIdsBeforeSteer == [$steer.targetRunId] and
+              $steer.activeRunIdsWhileSteeredResponseHeld == [$steer.targetRunId] and
+              $steer.finalActiveRunIds == [] and
+              $steer.agentEventRunIds == [$steer.targetRunId] and
+              ($steer.chatFinalRunIds | length) == 2 and
+              ($steer.chatFinalRunIds | index($steer.targetRunId)) != null and
+              ($steer.chatFinalRunIds | index($steer.steerClientRunId)) != null and
+              ([$steer.targetLifecyclePhases[] | select(. == "start")] | length) == 1 and
+              ([$steer.targetLifecyclePhases[] | select(. == "end")] | length) == 1 and
+              $steer.noSuccessorDispatch.activeTargetRetainedAsOnlyVisibleRun == true and
+              $steer.noSuccessorDispatch.allAgentEventsBelongToTarget == true and
+              $steer.noSuccessorDispatch.noConcurrentProviderDispatchBeforeTargetReleased == true and
+              $steer.noSuccessorDispatch.noThirdChatSend == true and
+              $steer.noSuccessorDispatch.steerClientFinalizedWithoutAgentLifecycle == true and
+              $steer.noSuccessorDispatch.targetLifecycleEndedOnce == true and
+              $steer.noSuccessorDispatch.targetLifecycleStartedOnce == true and
+              $steer.providerRequestsBeforeInitialRelease ==
+                ($steer.providerRequestsBeforeRun + 1) and
+              $steer.providerRequestsWhileSteeredResponseHeld ==
+                ($steer.providerRequestsBeforeRun + 2) and
+              $steer.providerRequestsAfterCompletion ==
+                ($steer.providerRequestsBeforeRun + 2)) and
+            (.resetBoundaryGuardedRetry as $retry |
+              ($retry | has("browserActiveLeafEntryId")) and
+              ($retry | has("browserPostResetMessageCount")) and
+              ($retry | has("controllerActiveLeafEntryId")) and
+              ($retry | has("controllerPostResetMessageCount")) and
+              ($retry | has("persistedExpectedLeafEntryId")) and
+              ($retry | has("resetBoundaryEntryId")) and
+              ($retry | has("resetBoundaryHasFirstKeptEntryId")) and
+              ($retry | has("retryExpectedLeafEntryId")) and
+              ($retry.browserActiveLeafEntryId | nonempty) and
+              ($retry.controllerActiveLeafEntryId | nonempty) and
+              ($retry.persistedExpectedLeafEntryId | nonempty) and
+              ($retry.resetBoundaryEntryId | nonempty) and
+              ($retry.resetBoundaryParentId | nonempty) and
+              ($retry.retryExpectedLeafEntryId | nonempty) and
+              ($retry.preResetSessionId | nonempty) and
+              ($retry.postResetSessionId | nonempty) and
+              ($retry.retrySessionId | nonempty) and
+              ($retry.queuedRevisionLeafEntryId | nonempty) and
+              ($retry.queuedRevisionSessionId | nonempty) and
+              ($retry.preResetLifecycleRevision | nonempty) and
+              ($retry.postResetLifecycleRevision | nonempty) and
+              ($retry.visibleReply | nonempty) and
+              $retry.resetBoundaryType == "reset" and
+              $retry.resetBoundaryReason == "reset" and
+              $retry.resetBoundaryHasFirstKeptEntryId == false and
+              $retry.resetBoundaryDiffersFromQueuedLeafEntryId == true and
+              $retry.browserPostResetMessageCount == 0 and
+              $retry.controllerPostResetMessageCount == 0 and
+              $retry.gatewayAcceptedRetry == true and
+              $retry.finalActiveRunIdsAfterRetry == [] and
+              $retry.sessionResetRequestObserved == true and
+              $retry.sessionResetResponseOk == true and
+              $retry.sessionIdRetainedAcrossReset == true and
+              $retry.slashMenuDismissedWithEscape == true and
+              $retry.sqliteLifecycleRevisionChanged == true and
+              $retry.sqliteResetBoundaryAppended == true and
+              $retry.browserHistoryRequestAfterReset == true and
+              $retry.browserHistoryResponseOk == true and
+              ($retry.immediateRetryRace as $race |
+                $race.realGatewayResponseHeldBeforeUiApply == true and
+                $race.postRejectionHistoryRequestObservedAfterSend == true and
+                $race.postRejectionHistoryResponseOk == true and
+                $race.postRejectionHistoryRequestId != null and
+                $race.historyHoldBeforeRetry.rejectedSendObserved == true and
+                $race.historyHoldBeforeRetry.historyHeld == true and
+                $race.historyHoldBeforeRetry.historyReleased == false and
+                $race.historyHoldBeforeRetry.postRejectionHistoryRequests == 1 and
+                $race.historyHoldWhileRetryBlocked == $race.historyHoldBeforeRetry and
+                $race.historyHoldAfterRelease.historyHeld == true and
+                $race.historyHoldAfterRelease.historyReleased == true and
+                $race.noSecondSendWhileHeld == true and
+                $race.noSecondSendAfterSupersede == true and
+                $race.rowRemainedFailedWhileHeld == true and
+                $race.rowRemainedFailedAfterSupersede == true and
+                $race.chatSendsBeforeRetry == $race.chatSendsWhileHistoryHeld and
+                $race.chatSendsBeforeRetry == $race.chatSendsAfterSupersededRetry and
+                $race.failedRevisionWhileHeld.expectedLeafEntryId ==
+                  $retry.queuedRevisionLeafEntryId and
+                $race.failedRevisionWhileHeld.sessionId ==
+                  $retry.queuedRevisionSessionId and
+                $race.failedRevisionAfterSupersede == $race.failedRevisionWhileHeld) and
+              $retry.guardEquality.allEqual == true and
+              $retry.guardEquality.browserHistoryEqualsBoundary == true and
+              $retry.guardEquality.controllerHistoryEqualsBoundary == true and
+              $retry.guardEquality.persistedOutboxEqualsBoundary == true and
+              $retry.guardEquality.rawRetryEqualsBoundary == true and
+              $retry.browserActiveLeafEntryId == $retry.resetBoundaryEntryId and
+              $retry.controllerActiveLeafEntryId == $retry.resetBoundaryEntryId and
+              $retry.retryExpectedLeafEntryId == $retry.resetBoundaryEntryId and
+              $retry.persistedExpectedLeafEntryId == $retry.resetBoundaryEntryId and
+              $retry.persistedRevisionWhileProviderHeld.expectedLeafEntryId ==
+                $retry.resetBoundaryEntryId and
+              $retry.persistedRevisionWhileProviderHeld.sessionId ==
+                $retry.postResetSessionId and
+              $retry.resetBoundaryEntryId != $retry.queuedRevisionLeafEntryId and
+              $retry.resetBoundaryParentId ==
+                .restoredQueuedBranchSwitch.activeLeafAfterSwitch and
+              $retry.queuedRevisionLeafEntryId ==
+                .restoredQueuedBranchSwitch.expectedLeafEntryIdSent and
+              $retry.preResetSessionId ==
+                .restoredQueuedBranchSwitch.activeSessionAfterSwitch and
+              $retry.postResetSessionId == $retry.preResetSessionId and
+              $retry.postResetSessionId != $retry.queuedRevisionSessionId and
+              $retry.postResetLifecycleRevision != $retry.preResetLifecycleRevision and
+              $retry.retrySessionId == $retry.postResetSessionId and
+              $retry.failedRowOldRevisionAfterClear.expectedLeafEntryId ==
+                $retry.queuedRevisionLeafEntryId and
+              $retry.failedRowOldRevisionAfterClear.sessionId ==
+                $retry.queuedRevisionSessionId and
+              $retry.providerRequestsAfterRetry ==
+                ($retry.providerRequestsBeforeRetry + 1))
+          ' "$verdict" >/dev/null
+
+          trace="$artifact_dir/05-reset-boundary-retry-native-ws-trace.json"
+          test -s "$trace"
+          jq -e '
+            def nonempty: type == "string" and length > 0;
+            .transport == "browser-native-websocket" and
+            (.immediateRetryRace as $race |
+              $race.realGatewayResponseHeldBeforeUiApply == true and
+              $race.postRejectionHistoryRequestObservedAfterSend == true and
+              $race.postRejectionHistoryResponseOk == true and
+              $race.postRejectionHistoryRequestId != null and
+              $race.historyHoldBeforeRetry.rejectedSendObserved == true and
+              $race.historyHoldBeforeRetry.historyHeld == true and
+              $race.historyHoldBeforeRetry.historyReleased == false and
+              $race.historyHoldBeforeRetry.postRejectionHistoryRequests == 1 and
+              $race.historyHoldWhileRetryBlocked == $race.historyHoldBeforeRetry and
+              $race.historyHoldAfterRelease.historyHeld == true and
+              $race.historyHoldAfterRelease.historyReleased == true and
+              $race.noSecondSendWhileHeld == true and
+              $race.noSecondSendAfterSupersede == true and
+              $race.rowRemainedFailedWhileHeld == true and
+              $race.rowRemainedFailedAfterSupersede == true and
+              $race.chatSendsBeforeRetry == $race.chatSendsWhileHistoryHeld and
+              $race.chatSendsBeforeRetry == $race.chatSendsAfterSupersededRetry and
+              $race.failedRevisionAfterSupersede == $race.failedRevisionWhileHeld) and
+            .sessionReset.responseOk == true and
+            .sessionReset.responseKey == .sessionReset.key and
+            .sessionReset.sessionIdRetainedAcrossReset == true and
+            (.sessionReset.key | nonempty) and
+            (.sessionReset.sessionId | nonempty) and
+            (.sessionReset.preLifecycleRevision | nonempty) and
+            (.sessionReset.postLifecycleRevision | nonempty) and
+            .sessionReset.postLifecycleRevision != .sessionReset.preLifecycleRevision and
+            (.postResetHistory | has("browserActiveLeafEntryId")) and
+            (.postResetHistory | has("browserMessageCount")) and
+            (.postResetHistory | has("controllerActiveLeafEntryId")) and
+            (.postResetHistory | has("controllerMessageCount")) and
+            (.postResetHistory.browserActiveLeafEntryId | nonempty) and
+            (.postResetHistory.controllerActiveLeafEntryId | nonempty) and
+            .postResetHistory.browserHistoryRequestObserved == true and
+            .postResetHistory.browserHistoryResponseOk == true and
+            .postResetHistory.browserMessageCount == 0 and
+            .postResetHistory.controllerMessageCount == 0 and
+            .postResetHistory.browserMessageCount == .postResetHistory.controllerMessageCount and
+            (.postResetHistory.requestSessionKey | nonempty) and
+            (.postResetHistory.browserSessionId | nonempty) and
+            (.postResetHistory.controllerSessionId | nonempty) and
+            .postResetHistory.requestSessionKey == .sessionReset.key and
+            .postResetHistory.browserSessionId == .sessionReset.sessionId and
+            .postResetHistory.controllerSessionId == .sessionReset.sessionId and
+            .sqliteReset.sessionId == .sessionReset.sessionId and
+            .sqliteReset.lifecycleRevision == .sessionReset.postLifecycleRevision and
+            .sqliteReset.lifecycleRevisionChanged == true and
+            (.sqliteReset.resetBoundary | has("entryId")) and
+            (.sqliteReset.resetBoundary | has("hasFirstKeptEntryId")) and
+            (.sqliteReset.resetBoundary.entryId | nonempty) and
+            (.sqliteReset.resetBoundary.parentId | nonempty) and
+            .sqliteReset.resetBoundary.hasFirstKeptEntryId == false and
+            .sqliteReset.resetBoundary.type == "reset" and
+            .sqliteReset.resetBoundary.reason == "reset" and
+            .sqliteReset.resetBoundary.differsFromQueuedLeafEntryId == true and
+            .sqliteReset.resetBoundaryAppended == true and
+            (.retryChatSend | has("expectedLeafEntryId")) and
+            (.retryChatSend.expectedLeafEntryId | nonempty) and
+            .retryChatSend.responseOk == true and
+            (.retryChatSend.sessionId | nonempty) and
+            (.persistedOutboxWhileProviderHeld | has("expectedLeafEntryId")) and
+            (.persistedOutboxWhileProviderHeld.expectedLeafEntryId | nonempty) and
+            (.persistedOutboxWhileProviderHeld.sessionId | nonempty) and
+            .postResetHistory.browserActiveLeafEntryId ==
+              .sqliteReset.resetBoundary.entryId and
+            .postResetHistory.controllerActiveLeafEntryId ==
+              .sqliteReset.resetBoundary.entryId and
+            .retryChatSend.expectedLeafEntryId == .sqliteReset.resetBoundary.entryId and
+            .persistedOutboxWhileProviderHeld.expectedLeafEntryId ==
+              .sqliteReset.resetBoundary.entryId and
+            .retryChatSend.sessionId == .sessionReset.sessionId and
+            .persistedOutboxWhileProviderHeld.sessionId == .sessionReset.sessionId and
+            .guardEquality.allEqual == true and
+            .guardEquality.browserHistoryEqualsBoundary == true and
+            .guardEquality.controllerHistoryEqualsBoundary == true and
+            .guardEquality.persistedOutboxEqualsBoundary == true and
+            .guardEquality.rawRetryEqualsBoundary == true
+          ' "$trace" >/dev/null
+          jq -e -s '
+            .[0] as $verdict |
+            .[1] as $trace |
+            $verdict.resetBoundaryGuardedRetry as $retry |
+            ($retry | has("resetBoundaryHasFirstKeptEntryId")) and
+            ($retry | has("browserPostResetMessageCount")) and
+            ($retry | has("controllerPostResetMessageCount")) and
+            ($trace.sqliteReset.resetBoundary | has("hasFirstKeptEntryId")) and
+            ($trace.postResetHistory | has("browserMessageCount")) and
+            ($trace.postResetHistory | has("controllerMessageCount")) and
+            $retry.resetBoundaryHasFirstKeptEntryId == false and
+            $trace.sqliteReset.resetBoundary.hasFirstKeptEntryId == false and
+            $retry.browserPostResetMessageCount == 0 and
+            $retry.controllerPostResetMessageCount == 0 and
+            $trace.postResetHistory.browserMessageCount == 0 and
+            $trace.postResetHistory.controllerMessageCount == 0 and
+            $trace.postResetHistory.requestSessionKey == $verdict.proofSessionKey and
+            $trace.sessionReset.key == $verdict.proofSessionKey and
+            $trace.postResetHistory.browserSessionId == $retry.postResetSessionId and
+            $trace.postResetHistory.controllerSessionId == $retry.postResetSessionId and
+            $trace.sessionReset.sessionId ==
+              $retry.postResetSessionId and
+            $trace.sessionReset.preLifecycleRevision ==
+              $retry.preResetLifecycleRevision and
+            $trace.sessionReset.postLifecycleRevision ==
+              $retry.postResetLifecycleRevision and
+            $trace.sqliteReset.sessionId == $retry.postResetSessionId and
+            $trace.sqliteReset.resetBoundary.entryId == $retry.resetBoundaryEntryId and
+            $trace.sqliteReset.resetBoundary.hasFirstKeptEntryId ==
+              $retry.resetBoundaryHasFirstKeptEntryId and
+            $trace.sqliteReset.resetBoundary.parentId == $retry.resetBoundaryParentId and
+            $trace.sqliteReset.resetBoundary.type == $retry.resetBoundaryType and
+            $trace.sqliteReset.resetBoundary.reason == $retry.resetBoundaryReason and
+            $trace.postResetHistory.browserActiveLeafEntryId ==
+              $retry.browserActiveLeafEntryId and
+            $trace.postResetHistory.browserMessageCount ==
+              $retry.browserPostResetMessageCount and
+            $trace.postResetHistory.controllerActiveLeafEntryId ==
+              $retry.controllerActiveLeafEntryId and
+            $trace.postResetHistory.controllerMessageCount ==
+              $retry.controllerPostResetMessageCount and
+            $trace.retryChatSend.expectedLeafEntryId == $retry.retryExpectedLeafEntryId and
+            $trace.retryChatSend.sessionId == $retry.retrySessionId and
+            $trace.persistedOutboxWhileProviderHeld.expectedLeafEntryId ==
+              $retry.persistedExpectedLeafEntryId and
+            $trace.persistedOutboxWhileProviderHeld.sessionId == $retry.postResetSessionId and
+            $trace.guardEquality == $retry.guardEquality and
+            $trace.immediateRetryRace == $retry.immediateRetryRace and
+            $trace.terminalBarrier.activeRunIds == [] and
+            $trace.terminalBarrier.activeRunIds == $retry.finalActiveRunIdsAfterRetry and
+            $trace.terminalBarrier.observedVia == "controller-chat.history" and
+            $retry.sessionIdRetainedAcrossReset == true and
+            $retry.sqliteLifecycleRevisionChanged == true and
+            $retry.sqliteResetBoundaryAppended == true
+          ' "$verdict" "$trace" >/dev/null
+
+          exact_run_trace="$artifact_dir/06-exact-run-steer-native-ws-trace.json"
+          test -s "$exact_run_trace"
+          jq -e '
+            def nonempty: type == "string" and length > 0;
+            .runIdentity.targetRunId as $target |
+            .runIdentity.steerClientRunId as $client |
+            .headSha == "e016032cf4746c0c220966108df29ae87fe7db7e" and
+            .baseSha == "1f15bc92f90353bd6a7327e149cb5dddf0a17bd1" and
+            (.evidenceTipSha | nonempty) and
+            .dataClassification == "synthetic-redacted" and
+            .gatewayMode == "real-ephemeral-process" and
+            .mockGateway == false and
+            .phase == 4 and
+            .providerBoundary == "synthetic-local-http" and
+            .transport == "browser-native-websocket" and
+            ($target | nonempty) and
+            ($client | nonempty) and
+            $client != $target and
+            (.exactRunAdmission.expectedLeafEntryId | nonempty) and
+            (.exactRunAdmission.expectedRunId | nonempty) and
+            (.exactRunAdmission.message | nonempty) and
+            (.exactRunAdmission.requestId | nonempty) and
+            (.exactRunAdmission.requestSessionKey | nonempty) and
+            (.exactRunAdmission.slashCommand | nonempty) and
+            .exactRunAdmission.deliver == false and
+            .exactRunAdmission.queueMode == "steer" and
+            (.exactRunAdmission.slashCommand | startswith("/steer ")) and
+            .exactRunAdmission.expectedRunId == $target and
+            .exactRunAdmission.steerClientRunId == $client and
+            .exactRunAdmission.responseOk == true and
+            .exactRunAdmission.responseStatus == "started" and
+            (.initialRunAdmission.requestId | nonempty) and
+            .initialRunAdmission.responseOk == true and
+            .initialRunAdmission.responseStatus == "started" and
+            .initialRunAdmission.responseRunId == $target and
+            .initialRunAdmission.targetRunId == $target and
+            (.leafProgress.renderedLeaf | nonempty) and
+            (.leafProgress.activeLeafBeforeSteer | nonempty) and
+            (.leafProgress.activeLeafWhileSteeredResponseHeld | nonempty) and
+            (.leafProgress.browserDisplayedLeafBeforeDrift | nonempty) and
+            (.leafProgress.browserSessionLeafBeforeDrift | nonempty) and
+            (.browserHistoryRefresh.requestId | nonempty) and
+            .browserHistoryRefresh.responseOk == true and
+            .browserHistoryRefresh.transport == "browser-native-websocket" and
+            .browserHistoryRefresh.activeRunIds == [$target] and
+            .browserHistoryRefresh.displayedLeafEntryId ==
+              .leafProgress.activeLeafBeforeSteer and
+            (.terminalBrowserHistoryRefresh.requestId | nonempty) and
+            (.terminalBrowserHistoryRefresh.activeLeafEntryId | nonempty) and
+            .terminalBrowserHistoryRefresh.responseOk == true and
+            .terminalBrowserHistoryRefresh.transport == "browser-native-websocket" and
+            .terminalBrowserHistoryRefresh.activeRunIds == [] and
+            .terminalBrowserHistoryRefresh.activeLeafEntryId ==
+              .terminalBrowserHistoryRefresh.displayedLeafEntryId and
+            .terminalBrowserHistoryRefresh.paneRunIdBeforeRefresh ==
+              .runIdentity.paneRunIdAfterDrift and
+            .terminalBrowserHistoryRefresh.paneRunIdAfterRefresh == null and
+            .terminalBrowserHistoryRefresh.pendingAfterRefresh == null and
+            .terminalBrowserHistoryRefresh.pendingClearedBeforeRefresh == true and
+            .terminalBrowserHistoryRefresh.replyVisibleBeforeRefresh == true and
+            .terminalBrowserHistoryRefresh.replyVisibleAfterRefresh == true and
+            .leafProgress.staleRenderedLeafSent == true and
+            .exactRunAdmission.expectedLeafEntryId == .leafProgress.renderedLeaf and
+            .leafProgress.browserSessionLeafBeforeDrift ==
+              .leafProgress.activeLeafBeforeSteer and
+            .leafProgress.browserDisplayedLeafBeforeDrift ==
+              .leafProgress.activeLeafBeforeSteer and
+            .leafProgress.renderedLeaf != .leafProgress.activeLeafBeforeSteer and
+            .leafProgress.activeLeafBeforeSteer !=
+              .leafProgress.activeLeafWhileSteeredResponseHeld and
+            .runIdentity.activeRunIdsBeforeSteer == [$target] and
+            .runIdentity.activeRunIdsWhileSteeredResponseHeld == [$target] and
+            .runIdentity.finalActiveRunIds == [] and
+            (.eventEvidence.agentEventCount | type == "number") and
+            .eventEvidence.agentEventCount > 0 and
+            .eventEvidence.agentEventRunIds == [$target] and
+            (.eventEvidence.chatFinalRunIds | length) == 2 and
+            (.eventEvidence.chatFinalRunIds | index($target)) != null and
+            (.eventEvidence.chatFinalRunIds | index($client)) != null and
+            ([.eventEvidence.targetLifecyclePhases[] | select(. == "start")] | length) == 1 and
+            ([.eventEvidence.targetLifecyclePhases[] | select(. == "end")] | length) == 1 and
+            .noSuccessorDispatch.activeTargetRetainedAsOnlyVisibleRun == true and
+            .noSuccessorDispatch.allAgentEventsBelongToTarget == true and
+            .noSuccessorDispatch.noConcurrentProviderDispatchBeforeTargetReleased == true and
+            .noSuccessorDispatch.noThirdChatSend == true and
+            .noSuccessorDispatch.steerClientFinalizedWithoutAgentLifecycle == true and
+            .noSuccessorDispatch.targetLifecycleEndedOnce == true and
+            .noSuccessorDispatch.targetLifecycleStartedOnce == true and
+            .pendingOwnership.clearedAfterTargetCompletion == true and
+            .pendingOwnership.beforeInitialRelease.kind == "steered" and
+            .pendingOwnership.beforeInitialRelease.text ==
+              .exactRunAdmission.slashCommand and
+            .pendingOwnership.beforeInitialRelease.pendingRunId == $target and
+            .pendingOwnership.beforeInitialRelease.steerTargetRunId == $target and
+            .pendingOwnership.whileSteeredResponseHeld ==
+              .pendingOwnership.beforeInitialRelease and
+            (.runIdentity.paneRunIdAfterDrift | nonempty) and
+            .runIdentity.paneRunIdAfterDrift != $target and
+            .runIdentity.paneRunIdBeforeTerminalRefresh ==
+              .runIdentity.paneRunIdAfterDrift and
+            .runIdentity.paneRunIdAfterCompletion == null and
+            .uiStateDrift.activeLeafEntryIdBeforeDrift ==
+              .leafProgress.browserSessionLeafBeforeDrift and
+            .uiStateDrift.activeLeafEntryIdAfterDrift == .leafProgress.renderedLeaf and
+            .uiStateDrift.displayedLeafEntryIdBeforeDrift ==
+              .leafProgress.activeLeafBeforeSteer and
+            .uiStateDrift.displayedLeafEntryIdAfterDrift ==
+              .leafProgress.activeLeafBeforeSteer and
+            .uiStateDrift.paneRunIdBeforeDrift == $target and
+            .uiStateDrift.paneRunIdAfterDrift ==
+              .runIdentity.paneRunIdAfterDrift and
+            .uiStateDrift.seededByProof == true and
+            .uiStateDrift.targetRunId == $target and
+            (.providerDispatch.beforeRun | type == "number") and
+            .providerDispatch.beforeInitialRelease ==
+              (.providerDispatch.beforeRun + 1) and
+            .providerDispatch.whileSteeredResponseHeld ==
+              (.providerDispatch.beforeRun + 2) and
+            .providerDispatch.afterCompletion ==
+              (.providerDispatch.beforeRun + 2) and
+            .providerDispatch.firstRequestContainsSteerPrompt == false and
+            .providerDispatch.secondRequestContainsSteerPrompt == true
+          ' "$exact_run_trace" >/dev/null
+          jq -e -s '
+            .[0] as $verdict |
+            .[1] as $trace |
+            $verdict.exactRunSteerSameRun as $steer |
+            $trace.headSha == $verdict.headSha and
+            $trace.baseSha == $verdict.baseSha and
+            $trace.evidenceTipSha == $verdict.evidenceTipSha and
+            $trace.exactRunAdmission.requestSessionKey == $verdict.proofSessionKey and
+            $trace.exactRunAdmission.requestSessionKey == $steer.requestSessionKey and
+            $trace.exactRunAdmission.slashCommand == $steer.slashCommandSent and
+            $trace.exactRunAdmission.deliver == $steer.deliverSent and
+            $trace.exactRunAdmission.queueMode == $steer.queueModeSent and
+            $trace.exactRunAdmission.expectedRunId == $steer.expectedRunIdSent and
+            $trace.exactRunAdmission.expectedLeafEntryId ==
+              $steer.expectedLeafEntryIdSent and
+            $trace.exactRunAdmission.steerClientRunId == $steer.steerClientRunId and
+            $trace.exactRunAdmission.responseOk == $steer.gatewayAcceptedSteer and
+            $trace.exactRunAdmission.responseStatus == $steer.gatewaySteerStatus and
+            $trace.initialRunAdmission.responseRunId == $steer.initialAckRunId and
+            $trace.initialRunAdmission.targetRunId == $steer.targetRunId and
+            $trace.leafProgress.renderedLeaf == $steer.renderedLeaf and
+            $trace.leafProgress.activeLeafBeforeSteer == $steer.activeLeafBeforeSteer and
+            $trace.leafProgress.activeLeafWhileSteeredResponseHeld ==
+              $steer.activeLeafWhileSteeredResponseHeld and
+            $trace.leafProgress.browserDisplayedLeafBeforeDrift ==
+              $steer.browserDisplayedLeafBeforeDrift and
+            $trace.leafProgress.browserSessionLeafBeforeDrift ==
+              $steer.browserSessionLeafBeforeDrift and
+            $trace.browserHistoryRefresh == $steer.browserHistoryRefresh and
+            $trace.terminalBrowserHistoryRefresh ==
+              $steer.terminalBrowserHistoryRefresh and
+            $trace.leafProgress.staleRenderedLeafSent ==
+              $steer.staleLeafBypassedByExactRun and
+            $trace.runIdentity.activeRunIdsBeforeSteer ==
+              $steer.activeRunIdsBeforeSteer and
+            $trace.runIdentity.activeRunIdsWhileSteeredResponseHeld ==
+              $steer.activeRunIdsWhileSteeredResponseHeld and
+            $trace.runIdentity.finalActiveRunIds == $steer.finalActiveRunIds and
+            $trace.runIdentity.paneRunIdAfterCompletion ==
+              $steer.paneRunIdAfterCompletion and
+            $trace.runIdentity.paneRunIdBeforeTerminalRefresh ==
+              $steer.paneRunIdBeforeTerminalRefresh and
+            $trace.runIdentity.paneRunIdAfterDrift == $steer.paneRunIdAfterDrift and
+            $trace.runIdentity.targetRunId == $steer.targetRunId and
+            $trace.runIdentity.steerClientRunId == $steer.steerClientRunId and
+            $trace.eventEvidence.agentEventRunIds == $steer.agentEventRunIds and
+            $trace.eventEvidence.chatFinalRunIds == $steer.chatFinalRunIds and
+            $trace.eventEvidence.targetLifecyclePhases ==
+              $steer.targetLifecyclePhases and
+            $trace.noSuccessorDispatch == $steer.noSuccessorDispatch and
+            $trace.pendingOwnership.beforeInitialRelease ==
+              $steer.pendingOwnershipBeforeInitialRelease and
+            $trace.pendingOwnership.whileSteeredResponseHeld ==
+              $steer.pendingOwnershipWhileSteeredResponseHeld and
+            $trace.pendingOwnership.clearedAfterTargetCompletion ==
+              $steer.pendingClearedAfterTargetCompletion and
+            $trace.providerDispatch.beforeRun == $steer.providerRequestsBeforeRun and
+            $trace.providerDispatch.beforeInitialRelease ==
+              $steer.providerRequestsBeforeInitialRelease and
+            $trace.providerDispatch.whileSteeredResponseHeld ==
+              $steer.providerRequestsWhileSteeredResponseHeld and
+            $trace.providerDispatch.afterCompletion ==
+              $steer.providerRequestsAfterCompletion
+          ' "$verdict" "$exact_run_trace" >/dev/null
+
+          expected_assets=(
+            "01-same-branch-send-accepted.png"
+            "01-same-branch-send-accepted.webm"
+            "02-queued-before-branch-switch.png"
+            "02-restored-cross-branch-needs-review.webm"
+            "03-restored-cross-branch-needs-review.png"
+            "04-failed-row-after-clear.png"
+            "05-reset-boundary-guard-retry-accepted.png"
+            "06-exact-run-steer-accepted.png"
+            "03-exact-run-steer-accepted.webm"
+          )
+          for asset in "${expected_assets[@]}"; do
+            test -s "$artifact_dir/$asset"
+          done
+
+          mapfile -t screenshots < <(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | sort)
+          mapfile -t videos < <(find "$artifact_dir" -maxdepth 1 -type f -name '*.webm' | sort)
+          [[ "${#screenshots[@]}" -eq 6 ]]
+          [[ "${#videos[@]}" -eq 3 ]]
+
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
+          printf '%s\n' '[' > "$artifact_dir/ffprobe.json"
+          separator=""
+          for video in "${videos[@]}"; do
+            probe="$(ffprobe -v error -show_entries format=filename,duration,size:stream=codec_name,width,height -of json "$video")"
+            [[ "$(jq -r '.format.duration | tonumber > 0' <<<"$probe")" == "true" ]]
+            [[ "$(jq -r '.format.size | tonumber > 0' <<<"$probe")" == "true" ]]
+            printf '%s%s\n' "$separator" "$(jq --arg artifact "$(basename "$video")" '. + {artifact: $artifact}' <<<"$probe")" >> "$artifact_dir/ffprobe.json"
+            separator=","
+          done
+          printf '%s\n' ']' >> "$artifact_dir/ffprobe.json"
+          jq empty "$artifact_dir/ffprobe.json"
+
+          jq -n \
+            --arg base "$EXPECTED_BASE" \
+            --arg browserOutcome "$BROWSER_OUTCOME" \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg focusedOutcome "$FOCUSED_OUTCOME" \
+            --arg head "$EXPECTED_HEAD" \
+            --argjson screenshots "${#screenshots[@]}" \
+            --argjson videos "${#videos[@]}" \
+            '{
+              baseSha: $base,
+              browserOutcome: $browserOutcome,
+              candidateHeadSha: $head,
+              dataClassification: "synthetic-redacted",
+              evidenceTipSha: $evidence,
+              focusedOutcome: $focusedOutcome,
+              focusedTestFileCount: 15,
+              gatewayMode: "real-ephemeral-process",
+              providerBoundary: "synthetic-local-http",
+              scenarioPhases: 4,
+              screenshots: $screenshots,
+              videos: $videos,
+              websocket: "real-browser-native"
+            }' > "$artifact_dir/run-metadata.json"
+          jq -e \
+            --arg base "$EXPECTED_BASE" \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg head "$EXPECTED_HEAD" \
+            '
+              .candidateHeadSha == $head and
+              .candidateHeadSha == "e016032cf4746c0c220966108df29ae87fe7db7e" and
+              .baseSha == $base and
+              .baseSha == "1f15bc92f90353bd6a7327e149cb5dddf0a17bd1" and
+              .evidenceTipSha == $evidence and
+              .focusedTestFileCount == 15 and
+              .scenarioPhases == 4 and
+              .screenshots == 6 and
+              .videos == 3
+            ' "$artifact_dir/run-metadata.json" >/dev/null
+
+          (
+            cd "$artifact_dir"
+            sha256sum \
+              ./*.json \
+              ./*.log \
+              ./*.png \
+              ./*.webm \
+              > SHA256SUMS
+          )
+
+      - name: Upload exact-head proof
+        id: artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-exact-head-${{ inputs.exact_ui_proof_head }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.json
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.log
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.png
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.webm
+            .artifacts/control-ui-e2e/pr-116382-exact-head/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Summarize artifact
+        if: always()
+        env:
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo "### Evidence artifact"
+            echo
+            echo "- Artifact ID: \`$ARTIFACT_ID\`"
+            echo "- Artifact digest: \`$ARTIFACT_DIGEST\`"
+            echo "- Artifact URL: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require complete proof
+        if: always()
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          MEDIA_OUTCOME: ${{ steps.media.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BROWSER_OUTCOME" == "success" ]]
+          [[ "$FOCUSED_OUTCOME" == "success" ]]
+          [[ "$MEDIA_OUTCOME" == "success" ]]
+          [[ "$ARTIFACT_OUTCOME" == "success" ]]
+
   # Preflight: establish routing truth and job matrices once, then let real
   # work fan out from a single source of truth.
   preflight:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'openclaw/openclaw') && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: 20
     outputs:
@@ -801,7 +1610,7 @@ jobs:
   security-fast:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3636,7 +4445,7 @@ jobs:
       - macos-swift
       - ios-build
       - android
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
