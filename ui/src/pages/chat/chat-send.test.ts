@@ -7078,7 +7078,7 @@ describe("handleSendChat", () => {
 
   it("keeps the rendered session and leaf paired across an async settings wait", async () => {
     const settingsPatch = createDeferred<boolean>();
-    const host = makeHost({
+    const host = makeChatHost({
       requestHandlers: {
         "chat.send": (params: unknown) => {
           const payload = requireRecord(params, "settings-delayed send payload");
@@ -7116,7 +7116,7 @@ describe("handleSendChat", () => {
 
   it("does not pair a captured leaf with a session discovered after submit", async () => {
     const settingsPatch = createDeferred<boolean>();
-    const host = makeHost({
+    const host = makeChatHost({
       requestHandlers: {
         "chat.send": (params: unknown) => {
           const payload = requireRecord(params, "generation-delayed send payload");
@@ -7209,7 +7209,7 @@ describe("handleSendChat", () => {
         return { runId: payload.idempotencyKey, status: "ok" };
       },
     });
-    const host = makeHost({
+    const host = makeChatHost({
       client: clientWithRequest(request),
       connected: true,
       currentSessionId: "session-current",
