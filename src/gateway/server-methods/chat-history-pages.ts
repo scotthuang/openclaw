@@ -1,5 +1,5 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import { resolveSessionTranscriptActiveLeafEntryId } from "../../config/sessions/session-accessor.js";
+import { SessionTranscriptProjectionUnavailableError } from "../../config/sessions/session-accessor.js";
 import {
   dropPreSessionStartAnnouncePairs,
   isHeartbeatHistoryTurnBoundaryMessage,
@@ -48,16 +48,16 @@ type ChatHistoryPage = {
   };
 };
 
-function resolveChatHistoryActiveLeafEntryId(
-  readPage: ReadRecentSessionMessagesResult,
+function resolveChatHistoryGuardLeaf(
+  page: Pick<ReadRecentSessionMessagesResult, "guardKind" | "guardLeafEntryId">,
+  sessionId: string,
 ): string | null {
-  if (readPage.transcriptSource !== "active") {
-    return null;
+  if (page.guardKind === "unavailable") {
+    throw new SessionTranscriptProjectionUnavailableError(sessionId, "active-leaf-identity");
   }
-  if (Object.hasOwn(readPage, "activeLeafEntryId")) {
-    return readPage.activeLeafEntryId ?? null;
-  }
-  return resolveSessionTranscriptActiveLeafEntryId(readPage.transcriptEvents ?? []) ?? null;
+  return page.guardKind === "identified" && typeof page.guardLeafEntryId === "string"
+    ? page.guardLeafEntryId
+    : null;
 }
 
 /** Add checkpoint token metrics to the synthetic transcript compaction marker. */
@@ -268,6 +268,8 @@ export async function readChatHistoryPage(params: {
         allowResetArchiveFallback: true,
       });
       if (!anchoredPage.found) {
+        // A missing anchor must not mask an unidentified active guard as ordinary not-found.
+        resolveChatHistoryGuardLeaf(anchoredPage, sessionId);
         return { messages: [] };
       }
       pageOffset = anchoredPage.offset;
@@ -287,6 +289,7 @@ export async function readChatHistoryPage(params: {
         allowResetArchiveFallback: true,
       });
     }
+    const activeLeafEntryId = resolveChatHistoryGuardLeaf(readPage, sessionId);
     const isTailPage = !messageId && pageOffset === 0;
     const overreadContextMessage = isTailPage
       ? readPage.messages.length > rawHistoryWindow.maxMessages
@@ -343,7 +346,7 @@ export async function readChatHistoryPage(params: {
     return {
       ...(isTailPage
         ? {
-            activeLeafEntryId: resolveChatHistoryActiveLeafEntryId(readPage),
+            activeLeafEntryId,
           }
         : {}),
       messages: normalized,
@@ -366,10 +369,10 @@ export async function readChatHistoryPage(params: {
     maxBytes: Math.max(maxHistoryBytes * 2, 1024 * 1024),
     allowResetArchiveFallback: true,
   });
+  const activeLeafEntryId = resolveChatHistoryGuardLeaf(readPage, sessionId);
   const overreadContextMessage =
     readPage.messages.length > rawHistoryWindow.maxMessages ? readPage.messages[0] : undefined;
   const turnBoundaryPending = isHeartbeatHistoryTurnBoundaryMessage(overreadContextMessage);
-  const activeLeafEntryId = resolveChatHistoryActiveLeafEntryId(readPage);
   const localMessagesWithBoundaryFilter = dropLocalHistoryOverreadContextMessage(
     dropPreSessionStartAnnouncePairs(
       readPage.messages,
