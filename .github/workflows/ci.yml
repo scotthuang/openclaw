@@ -38,6 +38,21 @@ on:
         required: false
         default: ""
         type: string
+      exact_ui_proof:
+        description: "Run only the temporary PR #116382 exact-head Control UI evidence job."
+        required: false
+        default: false
+        type: boolean
+      exact_ui_proof_head:
+        description: Exact PR head SHA required by the temporary Control UI evidence job.
+        required: false
+        default: ""
+        type: string
+      exact_ui_proof_base:
+        description: Expected merge-base SHA required by the temporary Control UI evidence job.
+        required: false
+        default: ""
+        type: string
   push:
     branches: [main]
     paths-ignore:
@@ -62,12 +77,1145 @@ env:
   NODE_VERSION: "24.x"
 
 jobs:
+  exact-ui-proof:
+    permissions:
+      contents: read
+    if: github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof
+    name: "PR #116382 exact-head Control UI proof"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout evidence tip
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify frozen candidate and evidence identity
+        env:
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_BRANCH: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          EXPECTED_MERGE_BASE: ${{ inputs.exact_ui_proof_base }}
+          FORK_REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_KEY: ${{ github.job }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.artifacts/control-ui-e2e/pr-116382-exact-head
+          mkdir -p "$artifact_dir"
+
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_MERGE_BASE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVIDENCE_BRANCH" == codex/pr116382-evidence-* ]]
+          [[ "$EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$EXPECTED_HEAD" == "f1e03ee902373c38842ffe2d796fb4d66aa130a6" ]]
+          [[ "$EXPECTED_MERGE_BASE" == "b0a1a2ab5c8dcc80551631dd016730c0a31f6e1e" ]]
+          [[ "$FORK_REPOSITORY" == "scotthuang/openclaw" ]]
+
+          actual_tip="$(git rev-parse HEAD)"
+          actual_parent="$(git rev-parse HEAD^)"
+          parent_field_count="$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')"
+          upstream_pr_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+          base_ref_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/heads/main | awk '{print $1}')"
+          queried_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          [[ "$actual_tip" == "$EVIDENCE_SHA" ]]
+          [[ "$actual_parent" == "$EXPECTED_HEAD" ]]
+          [[ "$parent_field_count" == "2" ]]
+          [[ "$upstream_pr_head" == "$EXPECTED_HEAD" ]]
+          [[ "$fork_product_head" == "$EXPECTED_HEAD" ]]
+          [[ "$base_ref_head" =~ ^[0-9a-f]{40}$ ]]
+
+          git fetch --no-tags --no-recurse-submodules \
+            https://github.com/openclaw/openclaw.git "$base_ref_head"
+          merge_base="$(git merge-base "$EXPECTED_HEAD" "$base_ref_head")"
+          [[ "$merge_base" == "$EXPECTED_MERGE_BASE" ]]
+
+          mapfile -t changed_files < <(git diff --name-only "$EXPECTED_HEAD"..HEAD | sort)
+          expected_files=(
+            ".github/workflows/ci.yml"
+            "ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts"
+          )
+          mapfile -t expected_files < <(printf '%s\n' "${expected_files[@]}" | sort)
+          diff -u <(printf '%s\n' "${expected_files[@]}") <(printf '%s\n' "${changed_files[@]}")
+
+          jq -n \
+            --arg baseRefHeadSha "$base_ref_head" \
+            --arg baseRefQueriedAt "$queried_at" \
+            --arg candidateHeadSha "$EXPECTED_HEAD" \
+            --arg eventName "$EVENT_NAME" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg evidenceParentSha "$actual_parent" \
+            --arg evidenceTipSha "$EVIDENCE_SHA" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg forkProductHeadSha "$fork_product_head" \
+            --arg jobKey "$JOB_KEY" \
+            --arg mergeBaseSha "$merge_base" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            --arg upstreamPrHeadSha "$upstream_pr_head" \
+            '{
+              baseRef: "refs/heads/main",
+              baseRefHeadSha: $baseRefHeadSha,
+              baseRefQueriedAt: $baseRefQueriedAt,
+              candidateHeadSha: $candidateHeadSha,
+              changedFiles: [
+                ".github/workflows/ci.yml",
+                "ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts"
+              ],
+              eventName: $eventName,
+              evidenceBranch: $evidenceBranch,
+              evidenceCommitParentCount: 1,
+              evidenceParentSha: $evidenceParentSha,
+              evidenceTipSha: $evidenceTipSha,
+              forkProductBranch: "fix/control-ui-stale-leaf",
+              forkProductHeadSha: $forkProductHeadSha,
+              forkRepository: $forkRepository,
+              jobKey: $jobKey,
+              mergeBaseSha: $mergeBaseSha,
+              pullRequestNumber: 116382,
+              repository: $repository,
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              sourceTrustRoute: "secretless-fork",
+              upstreamPrHeadSha: $upstreamPrHeadSha,
+              upstreamRepository: "openclaw/openclaw"
+            }' > "$artifact_dir/exact-head-identity.json"
+
+          {
+            echo "### Exact-head identity"
+            echo
+            echo "- Frozen candidate / upstream PR head: \`$EXPECTED_HEAD\`"
+            echo "- Fork product branch matched candidate: yes"
+            echo "- Evidence tip: \`$EVIDENCE_SHA\` (sole parent \`$actual_parent\`)"
+            echo "- Live main at $queried_at: \`$base_ref_head\`"
+            echo "- Candidate/live-main merge-base: \`$merge_base\`"
+            echo "- Evidence-only paths: 2"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          sticky-disk: "false"
+          use-actions-cache: "false"
+
+      - name: Install Playwright Chromium
+        run: node --import tsx scripts/ensure-playwright-chromium.mts --skip-ffmpeg
+
+      - name: Run one continuous real-Gateway browser scenario
+        id: browser
+        continue-on-error: true
+        env:
+          OPENCLAW_PR_116382_BASE: ${{ inputs.exact_ui_proof_base }}
+          OPENCLAW_PR_116382_EVIDENCE_SHA: ${{ github.sha }}
+          OPENCLAW_PR_116382_HEAD: ${{ inputs.exact_ui_proof_head }}
+          OPENCLAW_PR_116382_PROOF_DIR: .artifacts/control-ui-e2e/pr-116382-exact-head
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui-e2e.config.ts \
+            --configLoader runner \
+            ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts \
+            > .artifacts/control-ui-e2e/pr-116382-exact-head/browser-vitest.log 2>&1
+          echo "browser evidence captured; output withheld pending redaction audit"
+
+      - name: Run focused owner-boundary tests
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          focused_tests=(
+            packages/gateway-protocol/src/schema/logs-chat.test.ts
+            src/auto-reply/reply/reply-run-registry.test.ts
+            src/config/sessions/session-accessor.sqlite-active-events.test.ts
+            src/config/sessions/session-accessor.sqlite-active-events.reconcile.test.ts
+            src/config/sessions/session-accessor.sqlite-idless-boundaries.test.ts
+            src/gateway/managed-image-attachments.test.ts
+            src/gateway/session-transcript-readers.test.ts
+            src/gateway/session-transcript-readers.reset-archive.test.ts
+            src/gateway/server-methods/chat.directive-tags.test.ts
+            src/gateway/server.chat.gateway-server-chat-b.test.ts
+            src/state/sqlite-query-plan.test.ts
+            ui/src/lib/chat/outbox-store.test.ts
+            ui/src/pages/chat/chat-gateway.test.ts
+            ui/src/pages/chat/chat-command-executor.test.ts
+            ui/src/pages/chat/chat-send.test.ts
+            ui/src/pages/chat/composer-persistence.test.ts
+          )
+          [[ "${#focused_tests[@]}" -eq 16 ]]
+          node scripts/run-vitest.mjs "${focused_tests[@]}" \
+            > .artifacts/control-ui-e2e/pr-116382-exact-head/focused-vitest.log 2>&1
+          echo "focused evidence captured; output withheld pending redaction audit"
+
+      - name: Audit full-byte redacted logs and structured evidence
+        id: redaction
+        if: always()
+        continue-on-error: true
+        env:
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.artifacts/control-ui-e2e/pr-116382-exact-head
+          safe_dir=.artifacts/control-ui-e2e/pr-116382-redaction-blocked
+          mkdir -p "$artifact_dir" "$safe_dir"
+          jq -n \
+            --arg browserOutcome "$BROWSER_OUTCOME" \
+            --arg evidenceTipSha "$EVIDENCE_SHA" \
+            --arg focusedOutcome "$FOCUSED_OUTCOME" \
+            --arg headSha "$EXPECTED_HEAD" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '{
+              browserOutcome: $browserOutcome,
+              candidateHeadSha: $headSha,
+              dataClassification: "metadata-only-no-logs",
+              evidenceTipSha: $evidenceTipSha,
+              focusedOutcome: $focusedOutcome,
+              reason: "redaction audit failed; evidence files withheld",
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              status: "incomplete"
+            }' > "$safe_dir/incomplete-diagnostic.json"
+
+          mapfile -d '' -t auditable_files < <(find "$artifact_dir" -type f -print0 | sort -z)
+          [[ "${#auditable_files[@]}" -gt 0 ]]
+          sensitive_patterns=(
+            '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+            "(^|[^[:alnum:]_-])[\"']?(authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|gateway[-_]?token|token|client[-_]?secret|secret|password|passwd|cookie|set[-_]?cookie|private[-_]?key)[\"']?[[:space:]]*[:=]"
+            '(^|[^[:alnum:]_])Basic[[:space:]]+[A-Za-z0-9+/]{8,}={0,2}([^[:alnum:]+/=]|$)'
+            '(^|[^[:alnum:]_])Bearer[[:space:]]+[A-Za-z0-9._~+/-]{8,}'
+            '(AKIA|ASIA)[0-9A-Z]{16}'
+            'github_pat_[A-Za-z0-9_]{20,}'
+            'gh[pousr]_[A-Za-z0-9]{20,}'
+            'sk-[A-Za-z0-9_-]{20,}'
+            'pr-116382-synthetic-gateway-token'
+            'synthetic-local-only'
+          )
+          for pattern in "${sensitive_patterns[@]}"; do
+            if LC_ALL=C grep -a -E -i -l -- "$pattern" "${auditable_files[@]}" \
+              >/dev/null 2>&1; then
+              grep_status=0
+            else
+              grep_status=$?
+            fi
+            case "$grep_status" in
+              0)
+                echo "structured evidence failed the quiet authentication-material scan" >&2
+                exit 1
+                ;;
+              1) ;;
+              *)
+                echo "structured evidence authentication-material audit failed to run" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "full-byte artifact-tree redaction audit passed (${#auditable_files[@]} files)"
+
+      - name: Verify structured behavior evidence and build manifest
+        id: evidence
+        if: always()
+        continue-on-error: true
+        env:
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_BRANCH: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          EXPECTED_MERGE_BASE: ${{ inputs.exact_ui_proof_base }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          FORK_REPOSITORY: ${{ github.repository }}
+          JOB_KEY: ${{ github.job }}
+          REDACTION_OUTCOME: ${{ steps.redaction.outcome }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.artifacts/control-ui-e2e/pr-116382-exact-head
+          identity="$artifact_dir/exact-head-identity.json"
+          verdict="$artifact_dir/pr-116382-exact-head-proof.json"
+          trace="$artifact_dir/01-branch-rejection-single-retry-native-ws-trace.json"
+
+          [[ "$BROWSER_OUTCOME" == "success" ]]
+          [[ "$FOCUSED_OUTCOME" == "success" ]]
+          [[ "$REDACTION_OUTCOME" == "success" ]]
+          test -s "$identity"
+          if [[ ! -s "$verdict" ]]; then
+            echo "verdict missing" >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.status' "$verdict")" != "pass" ]]; then
+            echo "verdict incomplete" >&2
+            jq '{status, availableProofFields: (keys | sort)}' "$verdict" >&2
+            exit 1
+          fi
+          test -s "$trace"
+
+          jq -e \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg eventName "$EVENT_NAME" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg mergeBase "$EXPECTED_MERGE_BASE" \
+            --arg jobKey "$JOB_KEY" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '
+              .candidateHeadSha == $head and
+              .eventName == $eventName and
+              .evidenceBranch == $evidenceBranch and
+              .upstreamPrHeadSha == $head and
+              .upstreamRepository == "openclaw/openclaw" and
+              .forkProductHeadSha == $head and
+              .forkProductBranch == "fix/control-ui-stale-leaf" and
+              .forkRepository == $forkRepository and
+              .repository == $forkRepository and
+              .pullRequestNumber == 116382 and
+              .sourceTrustRoute == "secretless-fork" and
+              .evidenceParentSha == $head and
+              .evidenceTipSha == $evidence and
+              .evidenceCommitParentCount == 1 and
+              .mergeBaseSha == $mergeBase and
+              .jobKey == $jobKey and
+              .runAttempt == ($runAttempt | tonumber) and
+              .runId == ($runId | tonumber) and
+              .changedFiles == [
+                ".github/workflows/ci.yml",
+                "ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts"
+              ]
+            ' "$identity" >/dev/null
+
+          jq -e \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg mergeBase "$EXPECTED_MERGE_BASE" \
+            '
+              .status == "pass" and
+              .headSha == $head and
+              .mergeBaseSha == $mergeBase and
+              .evidenceTipSha == $evidence and
+              .dataClassification == "synthetic-redacted" and
+              .gatewayMode == "real-ephemeral-process" and
+              .mockGateway == false and
+              .providerBoundary == "synthetic-local-http" and
+              .scenarioCount == 1 and
+              .websocket == "real-browser-native-via-playwright-transparent-route" and
+              (.branchRejectionSingleRetry as $p |
+                $p.status == "pass" and
+                $p.continuousScenario == true and
+                $p.routeProof == {
+                  authoritativeDrainHistory: {
+                    agentId: "main",
+                    sessionKey: "global"
+                  },
+                  canonicalForegroundSend: {
+                    agentId: null,
+                    sessionKey: "agent:main:main"
+                  },
+                  canonicalPaneHistory: {
+                    agentId: "main",
+                    limit: 100,
+                    sessionKey: "agent:main:main"
+                  },
+                  durableQueueAfterReload: {
+                    agentId: "main",
+                    sessionKey: "global"
+                  },
+                  durableQueueBeforeSwitch: {
+                    agentId: "main",
+                    sessionKey: "global"
+                  },
+                  retrySend: {
+                    agentId: "main",
+                    sessionKey: "global"
+                  },
+                  sameRouteStaleToRetry: true,
+                  staleSend: {
+                    agentId: "main",
+                    sessionKey: "global"
+                  }
+                } and
+                $p.routeProof.staleSend == $p.routeProof.retrySend and
+                $p.samePathAcceptance.status == "pass" and
+                $p.samePathAcceptance.gatewayAccepted == true and
+                $p.samePathAcceptance.providerRequestDelta == 1 and
+                $p.samePathAcceptance.visibleReply ==
+                  "Same-path ancestor accepted by the real Gateway." and
+                $p.samePathAcceptance.authoritativeActiveLeafEntryIdBeforeSend !=
+                  $p.samePathAcceptance.browserDisplayedLeafEntryIdBeforeSend and
+                $p.samePathAcceptance.authoritativeActiveLeafEntryIdBeforeSend ==
+                  "pr-116382-same-path-background" and
+                $p.samePathAcceptance.browserDisplayedLeafEntryIdBeforeSend ==
+                  $p.samePathAcceptance.renderedLeaf and
+                $p.samePathAcceptance.authoritativeActiveRunIdsBeforeSend == [] and
+                $p.offlineQueue.status == "pass" and
+                $p.offlineQueue.survivedReload == true and
+                $p.offlineQueue.expectedLeafEntryId == $p.initialExpectedLeafEntryId and
+                $p.offlineQueue.sessionId == $p.initialSessionId and
+                $p.branchSwitch.status == "pass" and
+                $p.branchSwitch.sourceSessionId == $p.initialSessionId and
+                $p.branchSwitch.switchedLeaf == $p.switchedLeaf and
+                $p.branchSwitch.switchedSessionId == $p.switchedSessionId and
+                $p.rejection.status == "pass" and
+                $p.rejection.requestId == $p.rejectedRequestId and
+                $p.rejection.code == "INVALID_REQUEST" and
+                $p.rejection.reason == "active-leaf-changed" and
+                $p.rejection.providerRequestDelta == 0 and
+                $p.rejection.failedRowObserved == true and
+                $p.gatewayRejectionCode == "INVALID_REQUEST" and
+                $p.gatewayRejectionReason == "active-leaf-changed" and
+                ($p.rejectedRequestId | type == "string" and length > 0) and
+                $p.heldHistoryResponseArrived == true and
+                $p.heldHistoryResponseBlockedBeforeBrowserDelivery == true and
+                ($p.heldHistoryRequestId | type == "string" and length > 0) and
+                ($p.authoritativeDrainHistoryRequestId | type == "string" and length > 0) and
+                $p.authoritativeDrainHistoryResponseOk == true and
+                $p.noSecondChatSendWhileHeld == true and
+                $p.heldRetry.status == "pass" and
+                $p.heldRetry.clickCount == 1 and
+                $p.heldRetry.chatSendDelta == 0 and
+                $p.heldRetry.providerRequestDelta == 0 and
+                $p.heldRetry.failedRowPersisted == true and
+                $p.retryClicks == 1 and
+                $p.retryRequestCount == 1 and
+                ($p.retryRequestId | type == "string" and length > 0) and
+                $p.retrySessionId == $p.switchedSessionId and
+                $p.retryExpectedLeafEntryId == $p.switchedLeaf and
+                $p.heldHistorySessionId == $p.switchedSessionId and
+                $p.heldHistoryActiveLeafEntryId == $p.switchedLeaf and
+                $p.gatewayAcceptedRetry == true and
+                $p.providerRequestDelta == 1 and
+                $p.failedRowRetired == true and
+                $p.historyReleased == true and
+                $p.terminalActiveRunIds == [] and
+                $p.terminalSessionId == $p.switchedSessionId and
+                $p.visibleReply == "Single refreshed retry accepted by the real Gateway." and
+                ($p.screenshots | map(.asset)) == [
+                  "00-same-path-ancestor-accepted.png",
+                  "01-stale-revision-queued-offline.png",
+                  "02-branch-rejected-history-held.png",
+                  "03-single-retry-blocked-while-history-held.png",
+                  "04-single-refreshed-retry-accepted.png"
+                ] and
+                ($p.screenshots | all(
+                  .[];
+                  (.sha256 | type == "string") and
+                    (.sha256 | test("^[0-9a-f]{64}$"))
+                )) and
+                ($p.operatorTimeline | map(.name)) == [
+                  "same-path-accepted",
+                  "cross-branch-rejected-history-held",
+                  "single-retry-blocked-while-held",
+                  "held-history-released",
+                  "single-refreshed-retry-sent",
+                  "gateway-accepted-retry",
+                  "final-visible-row-retired"
+                ])
+            ' "$verdict" >/dev/null
+
+          jq -e -s \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg mergeBase "$EXPECTED_MERGE_BASE" \
+            '
+              .[0] as $verdict |
+              .[1] as $trace |
+              $verdict.branchRejectionSingleRetry as $p |
+              ($trace.sequence | to_entries) as $entries |
+              ($entries | map(select(
+                .value.frame.type == "req" and
+                .value.frame.id == $p.samePathAcceptance.requestId and
+                .value.frame.method == "chat.send" and
+                .value.frame.params.message == "send after same-path background progress" and
+                .value.frame.params.sessionKey == "agent:main:main" and
+                (.value.frame.params | has("agentId") | not)
+              )) | first) as $samePathRequest |
+              ($entries | map(select(
+                .value.frame.type == "res" and
+                .value.frame.id == $p.samePathAcceptance.requestId and
+                .value.frame.requestMethod == "chat.send" and
+                .value.frame.ok == true
+              )) | first) as $samePathResponse |
+              ($entries | map(select(
+                .value.frame.type == "req" and
+                .value.frame.id == $p.rejectedRequestId and
+                .value.frame.method == "chat.send" and
+                .value.frame.params.message == "retry this queued turn after the authoritative branch changes" and
+                .value.frame.params.expectedLeafEntryId == $p.initialExpectedLeafEntryId and
+                .value.frame.params.agentId == "main" and
+                .value.frame.params.sessionKey == "global"
+              )) | first) as $staleRequest |
+              ($entries | map(select(
+                .value.frame.type == "res" and
+                .value.frame.id == $p.rejectedRequestId and
+                .value.frame.requestMethod == "chat.send" and
+                .value.frame.ok == false and
+                .value.frame.error.code == "INVALID_REQUEST" and
+                .value.frame.error.details.reason == "active-leaf-changed"
+              )) | first) as $rejectionResponse |
+              ($entries | map(select(
+                .value.frame.type == "req" and
+                .value.frame.id == $p.heldHistoryRequestId and
+                .value.frame.method == "chat.history" and
+                .value.frame.params.limit == 100 and
+                .value.frame.params.agentId == "main" and
+                .value.frame.params.sessionKey == "agent:main:main"
+              )) | first) as $heldHistoryRequest |
+              ($entries | map(select(
+                .value.frame.type == "res" and
+                .value.frame.id == $p.heldHistoryRequestId and
+                .value.frame.requestMethod == "chat.history" and
+                .value.frame.ok == true
+              )) | first) as $heldHistoryResponse |
+              ($entries | map(select(
+                .value.frame.type == "req" and
+                .value.frame.id == $p.authoritativeDrainHistoryRequestId and
+                .value.frame.method == "chat.history" and
+                .value.frame.params.limit == 1000 and
+                .value.frame.params.agentId == "main" and
+                .value.frame.params.sessionKey == "global"
+              )) | first) as $drainHistoryRequest |
+              ($entries | map(select(
+                .value.frame.type == "res" and
+                .value.frame.id == $p.authoritativeDrainHistoryRequestId and
+                .value.frame.requestMethod == "chat.history" and
+                .value.frame.ok == true
+              )) | first) as $drainHistoryResponse |
+              ($entries | map(select(
+                .value.frame.type == "req" and
+                .value.frame.id == $p.retryRequestId and
+                .value.frame.method == "chat.send" and
+                .value.frame.params.message == "retry this queued turn after the authoritative branch changes" and
+                .value.frame.params.sessionId == $p.switchedSessionId and
+                .value.frame.params.expectedLeafEntryId == $p.switchedLeaf and
+                .value.frame.params.agentId == "main" and
+                .value.frame.params.sessionKey == "global"
+              )) | first) as $retryRequest |
+              ($entries | map(select(
+                .value.frame.type == "res" and
+                .value.frame.id == $p.retryRequestId and
+                .value.frame.requestMethod == "chat.send" and
+                .value.frame.ok == true
+              )) | first) as $retryResponse |
+              $trace.headSha == $head and
+              $trace.mergeBaseSha == $mergeBase and
+              $trace.evidenceTipSha == $evidence and
+              $trace.transport == "real-browser-native-websocket-via-playwright-connectToServer" and
+              $trace.gatewayMode == "real-ephemeral-process" and
+              $trace.mockGateway == false and
+              $trace.providerBoundary == "synthetic-local-http" and
+              $trace.routeProof == $p.routeProof and
+              $trace.screenshots == $p.screenshots and
+              $trace.historyGate.historyHeld == true and
+              $trace.historyGate.historyReleased == true and
+              $trace.historyGate.historyResponseArrived == true and
+              ($trace.historyGate.heldHistoryResponseSequence | type) == "number" and
+              ($trace.historyGate.releasedAfterTraceSequence | type) == "number" and
+              $trace.historyGate.postRejectionHistoryRequests == 1 and
+              ($trace.historyGate.heldHistoryRequestIds | length) == 1 and
+              $trace.historyGate.heldHistoryRequestIds[0] == $p.heldHistoryRequestId and
+              $trace.historyGate.heldHistoryResponse.sessionId == $p.switchedSessionId and
+              $trace.historyGate.heldHistoryResponse.activeLeafEntryId == $p.switchedLeaf and
+              $trace.samePathPrecondition.authoritativeActiveLeafEntryId ==
+                $p.samePathAcceptance.authoritativeActiveLeafEntryIdBeforeSend and
+              $trace.samePathPrecondition.browserDisplayedLeafEntryId ==
+                $p.samePathAcceptance.browserDisplayedLeafEntryIdBeforeSend and
+              $trace.samePathPrecondition.authoritativeActiveRunIds == [] and
+              $trace.terminalBarrier.sessionId == $p.switchedSessionId and
+              $trace.terminalBarrier.activeRunIds == [] and
+              ($trace.operatorTimeline | map(.name)) == ($p.operatorTimeline | map(.name)) and
+              $trace.operatorTimeline[1].chatSendCount == 2 and
+              $trace.operatorTimeline[2].chatSendCount == $trace.operatorTimeline[1].chatSendCount and
+              $trace.operatorTimeline[2].providerRequestCount == $trace.operatorTimeline[1].providerRequestCount and
+              $trace.operatorTimeline[3].chatSendCount == $trace.operatorTimeline[2].chatSendCount and
+              $trace.operatorTimeline[3].providerRequestCount == $trace.operatorTimeline[2].providerRequestCount and
+              $trace.operatorTimeline[6].chatSendCount == ($trace.operatorTimeline[1].chatSendCount + 1) and
+              $trace.operatorTimeline[6].providerRequestCount == ($trace.operatorTimeline[1].providerRequestCount + 1) and
+              ($trace.sequence | map(.sequence)) == [range(1; ($trace.sequence | length) + 1)] and
+              ([$p.samePathAcceptance.requestId, $p.rejectedRequestId,
+                $p.heldHistoryRequestId, $p.authoritativeDrainHistoryRequestId,
+                $p.retryRequestId] | unique | length) == 5 and
+              ([$entries[] | select(
+                .value.frame.type == "req" and
+                .value.frame.method == "chat.send" and
+                .value.frame.params.message ==
+                  "retry this queued turn after the authoritative branch changes"
+              )] | length) == 2 and
+              ($samePathRequest | type) == "object" and
+              ($samePathResponse | type) == "object" and
+              ($staleRequest | type) == "object" and
+              ($rejectionResponse | type) == "object" and
+              ($heldHistoryRequest | type) == "object" and
+              ($heldHistoryResponse | type) == "object" and
+              ($drainHistoryRequest | type) == "object" and
+              ($drainHistoryResponse | type) == "object" and
+              ($retryRequest | type) == "object" and
+              ($retryResponse | type) == "object" and
+              $samePathRequest.value.frame.params.sessionId == $p.initialSessionId and
+              $samePathRequest.value.frame.params.expectedLeafEntryId ==
+                $p.samePathAcceptance.browserDisplayedLeafEntryIdBeforeSend and
+              $samePathRequest.value.frame.params.sessionKey ==
+                $p.routeProof.canonicalForegroundSend.sessionKey and
+              ($samePathRequest.value.frame.params | has("agentId") | not) and
+              $heldHistoryRequest.value.frame.params.limit ==
+                $p.routeProof.canonicalPaneHistory.limit and
+              $heldHistoryRequest.value.frame.params.sessionKey ==
+                $p.routeProof.canonicalPaneHistory.sessionKey and
+              $heldHistoryRequest.value.frame.params.agentId ==
+                $p.routeProof.canonicalPaneHistory.agentId and
+              $staleRequest.value.frame.params.sessionId == $p.initialSessionId and
+              $staleRequest.value.frame.params.agentId == $p.routeProof.staleSend.agentId and
+              $staleRequest.value.frame.params.sessionKey == $p.routeProof.staleSend.sessionKey and
+              $drainHistoryRequest.value.frame.params.agentId ==
+                $p.routeProof.authoritativeDrainHistory.agentId and
+              $drainHistoryRequest.value.frame.params.sessionKey ==
+                $p.routeProof.authoritativeDrainHistory.sessionKey and
+              $retryRequest.value.frame.params.agentId == $p.routeProof.retrySend.agentId and
+              $retryRequest.value.frame.params.sessionKey == $p.routeProof.retrySend.sessionKey and
+              $p.routeProof.staleSend == $p.routeProof.retrySend and
+              $samePathRequest.key < $samePathResponse.key and
+              $samePathResponse.key < $staleRequest.key and
+              $staleRequest.key < $rejectionResponse.key and
+              $rejectionResponse.key < $heldHistoryRequest.key and
+              $heldHistoryRequest.key < $heldHistoryResponse.key and
+              $heldHistoryResponse.value.sequence == $trace.historyGate.heldHistoryResponseSequence and
+              $heldHistoryResponse.value.sequence <= $trace.historyGate.releasedAfterTraceSequence and
+              $trace.historyGate.releasedAfterTraceSequence < $drainHistoryRequest.value.sequence and
+              $heldHistoryResponse.key < $drainHistoryRequest.key and
+              $drainHistoryRequest.key < $drainHistoryResponse.key and
+              $drainHistoryResponse.key < $retryRequest.key and
+              $retryRequest.key < $retryResponse.key
+            ' "$verdict" "$trace" >/dev/null
+
+          expected_core_assets=(
+            "00-same-path-ancestor-accepted.png"
+            "01-stale-revision-queued-offline.png"
+            "02-branch-rejected-history-held.png"
+            "03-single-retry-blocked-while-history-held.png"
+            "04-single-refreshed-retry-accepted.png"
+            "01-branch-rejection-single-retry-native-ws-trace.json"
+            "browser-vitest.log"
+            "exact-head-identity.json"
+            "focused-vitest.log"
+            "pr-116382-exact-head-proof.json"
+          )
+          for asset in "${expected_core_assets[@]}"; do
+            test -s "$artifact_dir/$asset"
+          done
+
+          mapfile -t actual_core_assets < <(
+            find "$artifact_dir" -maxdepth 1 -type f -print | sed 's#^.*/##' | sort
+          )
+          mapfile -t expected_core_assets < <(
+            printf '%s\n' "${expected_core_assets[@]}" | sort
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_core_assets[@]}") \
+            <(printf '%s\n' "${actual_core_assets[@]}")
+
+          mapfile -t screenshots < <(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | sort)
+          expected_screenshots=(
+            "00-same-path-ancestor-accepted.png"
+            "01-stale-revision-queued-offline.png"
+            "02-branch-rejected-history-held.png"
+            "03-single-retry-blocked-while-history-held.png"
+            "04-single-refreshed-retry-accepted.png"
+          )
+          mapfile -t screenshot_names < <(
+            printf '%s\n' "${screenshots[@]}" | sed 's#^.*/##'
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_screenshots[@]}") \
+            <(printf '%s\n' "${screenshot_names[@]}")
+
+          screenshots_json="$(
+            for screenshot in "${screenshots[@]}"; do
+              asset="$(basename "$screenshot")"
+              sha256="$(sha256sum "$screenshot" | awk '{print $1}')"
+              jq -n --arg asset "$asset" --arg sha256 "$sha256" \
+                '{asset: $asset, sha256: $sha256}'
+            done | jq -s 'sort_by(.asset)'
+          )"
+          jq -e -s \
+            --argjson screenshots "$screenshots_json" \
+            '
+              (.[0].branchRejectionSingleRetry.screenshots | sort_by(.asset)) == $screenshots and
+              (.[1].screenshots | sort_by(.asset)) == $screenshots
+            ' "$verdict" "$trace" >/dev/null
+
+          jq -n \
+            --arg browserOutcome "$BROWSER_OUTCOME" \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg eventName "$EVENT_NAME" \
+            --arg focusedOutcome "$FOCUSED_OUTCOME" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg jobKey "$JOB_KEY" \
+            --arg mergeBase "$EXPECTED_MERGE_BASE" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            --argjson screenshots "$screenshots_json" \
+            '{
+              artifactFileCount: 12,
+              browserOutcome: $browserOutcome,
+              candidateHeadSha: $head,
+              dataClassification: "synthetic-redacted",
+              eventName: $eventName,
+              evidenceBranch: $evidenceBranch,
+              evidenceFormat: "structured-native-ws-verdict-logs-screenshots",
+              evidenceTipSha: $evidence,
+              focusedOutcome: $focusedOutcome,
+              focusedTestFileCount: 16,
+              forkProductBranch: "fix/control-ui-stale-leaf",
+              forkProductHeadSha: $head,
+              forkRepository: $forkRepository,
+              gatewayMode: "real-ephemeral-process",
+              jobKey: $jobKey,
+              logs: ["browser-vitest.log", "focused-vitest.log"],
+              mergeBaseSha: $mergeBase,
+              mockGateway: false,
+              nativeWebSocketTrace: "01-branch-rejection-single-retry-native-ws-trace.json",
+              outerActionsArtifactIdentity: "resolved after upload; bound by public release manifest",
+              providerBoundary: "synthetic-local-http",
+              pullRequestNumber: 116382,
+              redactionAudit: "full-byte-full-tree-authentication-material-scan",
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              scenarioCount: 1,
+              screenshotCount: ($screenshots | length),
+              screenshots: $screenshots,
+              sha256Manifest: "SHA256SUMS",
+              sourceTrustRoute: "secretless-fork",
+              upstreamPrHeadSha: $head,
+              upstreamRepository: "openclaw/openclaw",
+              video: "not_provided",
+              videoValidation: "not_applicable",
+              websocket: "real-browser-native-via-playwright-transparent-route"
+            }' > "$artifact_dir/proof-manifest.json"
+
+          jq -e -s \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg eventName "$EVENT_NAME" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg jobKey "$JOB_KEY" \
+            --arg mergeBase "$EXPECTED_MERGE_BASE" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '
+              .[0] as $identity |
+              .[1] as $verdict |
+              .[2] as $trace |
+              .[3] as $manifest |
+              $identity.candidateHeadSha == $head and
+              $identity.eventName == $eventName and
+              $identity.evidenceBranch == $evidenceBranch and
+              $identity.upstreamPrHeadSha == $head and
+              $identity.upstreamRepository == "openclaw/openclaw" and
+              $identity.forkProductHeadSha == $head and
+              $identity.forkProductBranch == "fix/control-ui-stale-leaf" and
+              $identity.forkRepository == $forkRepository and
+              $identity.repository == $forkRepository and
+              $identity.pullRequestNumber == 116382 and
+              $identity.sourceTrustRoute == "secretless-fork" and
+              $identity.evidenceParentSha == $head and
+              $identity.evidenceTipSha == $evidence and
+              $identity.evidenceCommitParentCount == 1 and
+              $identity.mergeBaseSha == $mergeBase and
+              $identity.jobKey == $jobKey and
+              $identity.runAttempt == ($runAttempt | tonumber) and
+              $identity.runId == ($runId | tonumber) and
+              $verdict.headSha == $identity.candidateHeadSha and
+              $verdict.evidenceTipSha == $identity.evidenceTipSha and
+              $verdict.mergeBaseSha == $identity.mergeBaseSha and
+              $trace.headSha == $verdict.headSha and
+              $trace.evidenceTipSha == $verdict.evidenceTipSha and
+              $trace.mergeBaseSha == $verdict.mergeBaseSha and
+              $manifest.candidateHeadSha == $trace.headSha and
+              $manifest.eventName == $identity.eventName and
+              $manifest.evidenceBranch == $identity.evidenceBranch and
+              $manifest.evidenceTipSha == $trace.evidenceTipSha and
+              $manifest.forkProductBranch == $identity.forkProductBranch and
+              $manifest.forkProductHeadSha == $identity.forkProductHeadSha and
+              $manifest.forkRepository == $identity.forkRepository and
+              $manifest.mergeBaseSha == $trace.mergeBaseSha and
+              $manifest.jobKey == $identity.jobKey and
+              $manifest.pullRequestNumber == $identity.pullRequestNumber and
+              $manifest.runAttempt == $identity.runAttempt and
+              $manifest.runId == $identity.runId and
+              $manifest.sourceTrustRoute == $identity.sourceTrustRoute and
+              $manifest.upstreamPrHeadSha == $identity.upstreamPrHeadSha and
+              $manifest.upstreamRepository == $identity.upstreamRepository and
+              $manifest.redactionAudit == "full-byte-full-tree-authentication-material-scan" and
+              $manifest.video == "not_provided" and
+              $manifest.videoValidation == "not_applicable" and
+              ($manifest.screenshots | sort_by(.asset)) ==
+                ($verdict.branchRejectionSingleRetry.screenshots | sort_by(.asset)) and
+              ($manifest.screenshots | sort_by(.asset)) == ($trace.screenshots | sort_by(.asset))
+            ' "$identity" "$verdict" "$trace" "$artifact_dir/proof-manifest.json" >/dev/null
+
+          (
+            cd "$artifact_dir"
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              > SHA256SUMS
+            [[ "$(wc -l < SHA256SUMS | tr -d ' ')" == "11" ]]
+            sha256sum --check SHA256SUMS
+          )
+
+          expected_authoritative_assets=(
+            "00-same-path-ancestor-accepted.png"
+            "01-stale-revision-queued-offline.png"
+            "02-branch-rejected-history-held.png"
+            "03-single-retry-blocked-while-history-held.png"
+            "04-single-refreshed-retry-accepted.png"
+            "01-branch-rejection-single-retry-native-ws-trace.json"
+            "browser-vitest.log"
+            "exact-head-identity.json"
+            "focused-vitest.log"
+            "pr-116382-exact-head-proof.json"
+            "proof-manifest.json"
+            "SHA256SUMS"
+          )
+          mapfile -t expected_authoritative_assets < <(
+            printf '%s\n' "${expected_authoritative_assets[@]}" | sort
+          )
+          mapfile -t actual_authoritative_assets < <(
+            find "$artifact_dir" -maxdepth 1 -type f -print | sed 's#^.*/##' | sort
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_authoritative_assets[@]}") \
+            <(printf '%s\n' "${actual_authoritative_assets[@]}")
+
+      - name: Revalidate frozen refs and audit final artifact bytes
+        id: preupload
+        if: always() && steps.browser.outcome == 'success' && steps.focused.outcome == 'success' && steps.redaction.outcome == 'success' && steps.evidence.outcome == 'success'
+        continue-on-error: true
+        env:
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_BRANCH: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          FORK_REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.artifacts/control-ui-e2e/pr-116382-exact-head
+          identity="$artifact_dir/exact-head-identity.json"
+          manifest="$artifact_dir/proof-manifest.json"
+
+          [[ "$EXPECTED_HEAD" == "f1e03ee902373c38842ffe2d796fb4d66aa130a6" ]]
+          [[ "$EVIDENCE_BRANCH" == codex/pr116382-evidence-* ]]
+          [[ "$EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$FORK_REPOSITORY" == "scotthuang/openclaw" ]]
+          [[ "$(git rev-parse HEAD)" == "$EVIDENCE_SHA" ]]
+          [[ "$(git rev-parse HEAD^)" == "$EXPECTED_HEAD" ]]
+          [[ "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" == "2" ]]
+          mapfile -t changed_files < <(git diff --name-only "$EXPECTED_HEAD"..HEAD | sort)
+          expected_files=(
+            ".github/workflows/ci.yml"
+            "ui/src/e2e/pr-116382-exact-head-proof.e2e.test.ts"
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_files[@]}" | sort) \
+            <(printf '%s\n' "${changed_files[@]}")
+
+          upstream_pr_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+          product_refs_rechecked_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [[ "$upstream_pr_head" == "$EXPECTED_HEAD" ]]
+          [[ "$fork_product_head" == "$EXPECTED_HEAD" ]]
+
+          final_identity="$RUNNER_TEMP/pr-116382-final-identity.json"
+          jq \
+            --arg forkProductHeadSha "$fork_product_head" \
+            --arg productRefsRecheckedAt "$product_refs_rechecked_at" \
+            --arg upstreamPrHeadSha "$upstream_pr_head" \
+            '.forkProductHeadSha = $forkProductHeadSha |
+             .productRefsRecheckedAt = $productRefsRecheckedAt |
+             .upstreamPrHeadSha = $upstreamPrHeadSha' \
+            "$identity" > "$final_identity"
+          mv "$final_identity" "$identity"
+
+          final_manifest="$RUNNER_TEMP/pr-116382-final-manifest.json"
+          jq \
+            --arg forkProductHeadSha "$fork_product_head" \
+            --arg productRefsRecheckedAt "$product_refs_rechecked_at" \
+            --arg upstreamPrHeadSha "$upstream_pr_head" \
+            '.forkProductHeadSha = $forkProductHeadSha |
+             .productRefsRecheckedAt = $productRefsRecheckedAt |
+             .upstreamPrHeadSha = $upstreamPrHeadSha' \
+            "$manifest" > "$final_manifest"
+          mv "$final_manifest" "$manifest"
+
+          jq -e \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg eventName "$EVENT_NAME" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg recheckedAt "$product_refs_rechecked_at" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '
+              .candidateHeadSha == $head and
+              .eventName == $eventName and
+              .evidenceBranch == $evidenceBranch and
+              .upstreamPrHeadSha == $head and
+              .upstreamRepository == "openclaw/openclaw" and
+              .forkProductHeadSha == $head and
+              .forkProductBranch == "fix/control-ui-stale-leaf" and
+              .forkRepository == $forkRepository and
+              .repository == $forkRepository and
+              .pullRequestNumber == 116382 and
+              .sourceTrustRoute == "secretless-fork" and
+              .evidenceParentSha == $head and
+              .evidenceTipSha == $evidence and
+              .evidenceCommitParentCount == 1 and
+              .productRefsRecheckedAt == $recheckedAt and
+              .runAttempt == ($runAttempt | tonumber) and
+              .runId == ($runId | tonumber)
+            ' "$identity" >/dev/null
+          jq -e \
+            --arg evidence "$EVIDENCE_SHA" \
+            --arg evidenceBranch "$EVIDENCE_BRANCH" \
+            --arg eventName "$EVENT_NAME" \
+            --arg forkRepository "$FORK_REPOSITORY" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg recheckedAt "$product_refs_rechecked_at" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '
+              .candidateHeadSha == $head and
+              .eventName == $eventName and
+              .evidenceBranch == $evidenceBranch and
+              .evidenceTipSha == $evidence and
+              .forkProductBranch == "fix/control-ui-stale-leaf" and
+              .forkProductHeadSha == $head and
+              .forkRepository == $forkRepository and
+              .productRefsRecheckedAt == $recheckedAt and
+              .pullRequestNumber == 116382 and
+              .runAttempt == ($runAttempt | tonumber) and
+              .runId == ($runId | tonumber) and
+              .sourceTrustRoute == "secretless-fork" and
+              .upstreamPrHeadSha == $head and
+              .upstreamRepository == "openclaw/openclaw" and
+              .video == "not_provided" and
+              .videoValidation == "not_applicable"
+            ' "$manifest" >/dev/null
+
+          (
+            cd "$artifact_dir"
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              > SHA256SUMS
+            [[ "$(wc -l < SHA256SUMS | tr -d ' ')" == "11" ]]
+            sha256sum --check SHA256SUMS >/dev/null
+          )
+
+          expected_assets=(
+            "00-same-path-ancestor-accepted.png"
+            "01-stale-revision-queued-offline.png"
+            "02-branch-rejected-history-held.png"
+            "03-single-retry-blocked-while-history-held.png"
+            "04-single-refreshed-retry-accepted.png"
+            "01-branch-rejection-single-retry-native-ws-trace.json"
+            "browser-vitest.log"
+            "exact-head-identity.json"
+            "focused-vitest.log"
+            "pr-116382-exact-head-proof.json"
+            "proof-manifest.json"
+            "SHA256SUMS"
+          )
+          mapfile -t actual_assets < <(
+            find "$artifact_dir" -maxdepth 1 -type f -print | sed 's#^.*/##' | sort
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_assets[@]}" | sort) \
+            <(printf '%s\n' "${actual_assets[@]}")
+
+          mapfile -d '' -t auditable_files < <(find "$artifact_dir" -type f -print0 | sort -z)
+          [[ "${#auditable_files[@]}" -eq 12 ]]
+          sensitive_patterns=(
+            '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+            "(^|[^[:alnum:]_-])[\"']?(authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|gateway[-_]?token|token|client[-_]?secret|secret|password|passwd|cookie|set[-_]?cookie|private[-_]?key)[\"']?[[:space:]]*[:=]"
+            '(^|[^[:alnum:]_])Basic[[:space:]]+[A-Za-z0-9+/]{8,}={0,2}([^[:alnum:]+/=]|$)'
+            '(^|[^[:alnum:]_])Bearer[[:space:]]+[A-Za-z0-9._~+/-]{8,}'
+            '(AKIA|ASIA)[0-9A-Z]{16}'
+            'github_pat_[A-Za-z0-9_]{20,}'
+            'gh[pousr]_[A-Za-z0-9]{20,}'
+            'sk-[A-Za-z0-9_-]{20,}'
+            'pr-116382-synthetic-gateway-token'
+            'synthetic-local-only'
+          )
+          for pattern in "${sensitive_patterns[@]}"; do
+            if LC_ALL=C grep -a -E -i -l -- "$pattern" "${auditable_files[@]}" \
+              >/dev/null 2>&1; then
+              grep_status=0
+            else
+              grep_status=$?
+            fi
+            case "$grep_status" in
+              0)
+                echo "final artifact failed the quiet authentication-material scan" >&2
+                exit 1
+                ;;
+              1) ;;
+              *)
+                echo "final artifact authentication-material audit failed to run" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "pre-upload dual-ref and full-byte artifact audit passed (${#auditable_files[@]} files)"
+
+      - name: Upload authoritative exact-head proof
+        id: artifact
+        if: steps.browser.outcome == 'success' && steps.focused.outcome == 'success' && steps.redaction.outcome == 'success' && steps.evidence.outcome == 'success' && steps.preupload.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-authoritative-exact-head-${{ inputs.exact_ui_proof_head }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.json
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.log
+            .artifacts/control-ui-e2e/pr-116382-exact-head/*.png
+            .artifacts/control-ui-e2e/pr-116382-exact-head/SHA256SUMS
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 14
+
+      - name: Mark incomplete diagnostic evidence
+        if: always() && steps.redaction.outcome == 'success' && (steps.browser.outcome != 'success' || steps.focused.outcome != 'success' || steps.evidence.outcome != 'success' || steps.preupload.outcome != 'success' || steps.artifact.outcome != 'success')
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD: ${{ inputs.exact_ui_proof_head }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          PREUPLOAD_OUTCOME: ${{ steps.preupload.outcome }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          diagnostic_dir=.artifacts/control-ui-e2e/pr-116382-incomplete-diagnostic
+          mkdir -p "$diagnostic_dir"
+          jq -n \
+            --arg artifactOutcome "$ARTIFACT_OUTCOME" \
+            --arg browserOutcome "$BROWSER_OUTCOME" \
+            --arg evidenceOutcome "$EVIDENCE_OUTCOME" \
+            --arg evidenceTipSha "$EVIDENCE_SHA" \
+            --arg focusedOutcome "$FOCUSED_OUTCOME" \
+            --arg preuploadOutcome "$PREUPLOAD_OUTCOME" \
+            --arg headSha "$EXPECTED_HEAD" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            '{
+              artifactOutcome: $artifactOutcome,
+              browserOutcome: $browserOutcome,
+              candidateHeadSha: $headSha,
+              evidenceOutcome: $evidenceOutcome,
+              evidenceTipSha: $evidenceTipSha,
+              focusedOutcome: $focusedOutcome,
+              preuploadOutcome: $preuploadOutcome,
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              dataClassification: "metadata-only-no-logs",
+              reason: "authoritative proof did not complete; raw evidence withheld",
+              status: "incomplete"
+            }' > "$diagnostic_dir/incomplete-diagnostic.json"
+
+      - name: Upload incomplete diagnostic on failure
+        id: incomplete_artifact
+        if: always() && steps.redaction.outcome == 'success' && (steps.browser.outcome != 'success' || steps.focused.outcome != 'success' || steps.evidence.outcome != 'success' || steps.preupload.outcome != 'success' || steps.artifact.outcome != 'success')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-incomplete-diagnostic-${{ inputs.exact_ui_proof_head }}-${{ github.run_attempt }}
+          path: .artifacts/control-ui-e2e/pr-116382-incomplete-diagnostic/incomplete-diagnostic.json
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload redaction-blocked diagnostic marker
+        if: always() && steps.redaction.outcome != 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-incomplete-redaction-blocked-${{ inputs.exact_ui_proof_head }}-${{ github.run_attempt }}
+          path: .artifacts/control-ui-e2e/pr-116382-redaction-blocked/incomplete-diagnostic.json
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
+
+      - name: Summarize authoritative artifact
+        if: steps.artifact.outcome == 'success'
+        env:
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo "### Authoritative evidence artifact"
+            echo
+            echo "- Artifact ID: \`$ARTIFACT_ID\`"
+            echo "- Artifact digest: \`$ARTIFACT_DIGEST\`"
+            echo "- Artifact URL: $ARTIFACT_URL"
+            echo "- Public release manifest will bind this post-upload identity without recursive ZIP self-reference."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require complete proof
+        if: always()
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          PREUPLOAD_OUTCOME: ${{ steps.preupload.outcome }}
+          REDACTION_OUTCOME: ${{ steps.redaction.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BROWSER_OUTCOME" == "success" ]]
+          [[ "$FOCUSED_OUTCOME" == "success" ]]
+          [[ "$REDACTION_OUTCOME" == "success" ]]
+          [[ "$EVIDENCE_OUTCOME" == "success" ]]
+          [[ "$PREUPLOAD_OUTCOME" == "success" ]]
+          [[ "$ARTIFACT_OUTCOME" == "success" ]]
+
   # Preflight: establish routing truth and job matrices once, then let real
   # work fan out from a single source of truth.
   preflight:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'openclaw/openclaw') && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: 20
     outputs:
@@ -849,7 +1997,7 @@ jobs:
   security-fast:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3623,7 +4771,7 @@ jobs:
       - macos-swift
       - ios-build
       - android
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.exact_ui_proof) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
