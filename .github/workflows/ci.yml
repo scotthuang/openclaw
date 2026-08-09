@@ -38,6 +38,21 @@ on:
         required: false
         default: ""
         type: string
+      sdk_baseline_codegen:
+        description: "Run only the temporary PR #116382 synthetic-merge Plugin SDK baseline generator."
+        required: false
+        default: false
+        type: boolean
+      sdk_baseline_codegen_head:
+        description: Frozen PR #116382 product head required by the temporary baseline generator.
+        required: false
+        default: ""
+        type: string
+      sdk_baseline_codegen_main:
+        description: Locked upstream main SHA required by the temporary baseline generator.
+        required: false
+        default: ""
+        type: string
   push:
     branches: [main]
     paths-ignore:
@@ -62,12 +77,376 @@ env:
   NODE_VERSION: "24.x"
 
 jobs:
+  sdk-baseline-codegen:
+    permissions:
+      contents: read
+    if: github.event_name == 'workflow_dispatch' && inputs.sdk_baseline_codegen
+    name: "PR #116382 synthetic-merge SDK baseline"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout evidence tip
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify identities and synthesize locked main plus product head
+        id: identity
+        env:
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD: ${{ inputs.sdk_baseline_codegen_head }}
+          EXPECTED_MAIN: ${{ inputs.sdk_baseline_codegen_main }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_HEAD" == "5aeb48c9b064f746e2cbdbc5aacafa1f56b85de6" ]]
+          [[ "$EXPECTED_MAIN" == "db61480056bdef1e4905fa503876b2edbc6c50d3" ]]
+
+          actual_tip="$(git rev-parse HEAD)"
+          actual_parent="$(git rev-parse HEAD^)"
+          parent_field_count="$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')"
+          upstream_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+          upstream_main_at_start="$(git ls-remote https://github.com/openclaw/openclaw.git refs/heads/main | awk '{print $1}')"
+          main_start_queried_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          live_merge_ref="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/merge | awk '{print $1}')"
+
+          [[ "$actual_tip" == "$EVIDENCE_SHA" ]]
+          [[ "$actual_parent" == "$EXPECTED_HEAD" ]]
+          [[ "$parent_field_count" == "2" ]]
+          [[ "$upstream_head" == "$EXPECTED_HEAD" ]]
+          [[ "$fork_product_head" == "$EXPECTED_HEAD" ]]
+          [[ "$upstream_main_at_start" == "$EXPECTED_MAIN" ]]
+          [[ "$live_merge_ref" =~ ^[0-9a-f]{40}$ ]]
+
+          mapfile -t changed_files < <(git diff --name-only "$EXPECTED_HEAD"..HEAD)
+          [[ "${#changed_files[@]}" -eq 1 ]]
+          [[ "${changed_files[0]}" == ".github/workflows/ci.yml" ]]
+
+          git fetch --no-tags --no-recurse-submodules \
+            https://github.com/openclaw/openclaw.git "$EXPECTED_MAIN"
+          merge_base="$(git merge-base "$EXPECTED_HEAD" "$EXPECTED_MAIN")"
+          [[ "$merge_base" == "b0a1a2ab5c8dcc80551631dd016730c0a31f6e1e" ]]
+          git checkout --detach "$EXPECTED_MAIN"
+          git -c user.name=OpenClaw -c user.email=ci@openclaw.local \
+            merge --no-ff --no-edit "$EXPECTED_HEAD"
+
+          synthetic_merge="$(git rev-parse HEAD)"
+          synthetic_tree="$(git rev-parse HEAD^{tree})"
+          [[ "$synthetic_tree" == "f0b66c0e821f1e5384298a7ce30bc42383b7fa5f" ]]
+          read -r merge_commit first_parent second_parent extra \
+            <<<"$(git rev-list --parents -n 1 HEAD)"
+          [[ "$merge_commit" == "$synthetic_merge" ]]
+          [[ "$first_parent" == "$EXPECTED_MAIN" ]]
+          [[ "$second_parent" == "$EXPECTED_HEAD" ]]
+          [[ -z "${extra:-}" ]]
+          [[ -z "$(git status --short)" ]]
+
+          {
+            echo "actual_parent=$actual_parent"
+            echo "fork_product_head=$fork_product_head"
+            echo "live_merge_ref=$live_merge_ref"
+            echo "main_start_queried_at=$main_start_queried_at"
+            echo "merge_base=$merge_base"
+            echo "synthetic_merge=$synthetic_merge"
+            echo "synthetic_tree=$synthetic_tree"
+            echo "upstream_head=$upstream_head"
+            echo "upstream_main_at_start=$upstream_main_at_start"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Synthetic merge identity"
+            echo
+            echo "- Product head: \`$EXPECTED_HEAD\`"
+            echo "- Locked main observed at start: \`$upstream_main_at_start\`"
+            echo "- Synthetic merge: \`$synthetic_merge\`"
+            echo "- Live merge ref observed (not used): \`$live_merge_ref\`"
+            echo "- Evidence tip: \`$EVIDENCE_SHA\` (sole parent \`$actual_parent\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup frozen Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          frozen-lockfile: "true"
+          sticky-disk: "false"
+          use-actions-cache: "false"
+
+      - name: Generate and package SDK baseline manifest
+        id: generate
+        env:
+          EVIDENCE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD: ${{ inputs.sdk_baseline_codegen_head }}
+          EXPECTED_MAIN: ${{ inputs.sdk_baseline_codegen_main }}
+          FORK_PRODUCT_HEAD: ${{ steps.identity.outputs.fork_product_head }}
+          LIVE_MERGE_REF: ${{ steps.identity.outputs.live_merge_ref }}
+          MAIN_START_QUERIED_AT: ${{ steps.identity.outputs.main_start_queried_at }}
+          MERGE_BASE: ${{ steps.identity.outputs.merge_base }}
+          EVIDENCE_PARENT: ${{ steps.identity.outputs.actual_parent }}
+          SYNTHETIC_MERGE: ${{ steps.identity.outputs.synthetic_merge }}
+          SYNTHETIC_TREE: ${{ steps.identity.outputs.synthetic_tree }}
+          UPSTREAM_HEAD: ${{ steps.identity.outputs.upstream_head }}
+          UPSTREAM_MAIN_AT_START: ${{ steps.identity.outputs.upstream_main_at_start }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=artifacts/pr-116382-sdk-baseline
+          baseline_path=docs/.generated/plugin-sdk-api-baseline.sha256
+
+          if [[ -e "$artifact_dir" ]]; then
+            echo "generated baseline artifact path existed before generation" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "synthetic merge workspace was not clean before generation" >&2
+            exit 1
+          fi
+
+          before_sha256="$(git show "HEAD:$baseline_path" | sha256sum | awk '{print $1}')"
+          raw_log="$(mktemp)"
+          trap 'rm -f "$raw_log"' EXIT
+          pnpm plugin-sdk:api:gen >"$raw_log" 2>&1
+          echo "SDK baseline generator completed; raw output withheld"
+
+          if ! git diff --cached --quiet; then
+            echo "SDK baseline generator staged tracked changes" >&2
+            exit 1
+          fi
+          status_after="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ "$status_after" != " M $baseline_path" ]]; then
+            echo "SDK baseline generator changed files outside the manifest allowlist" >&2
+            exit 1
+          fi
+
+          mapfile -t changed_files < <(git diff HEAD --name-only)
+          [[ "${#changed_files[@]}" -eq 1 ]]
+          [[ "${changed_files[0]}" == "$baseline_path" ]]
+          git diff HEAD --check
+
+          read -r added_lines deleted_lines changed_path \
+            <<<"$(git diff HEAD --numstat -- "$baseline_path")"
+          [[ "$changed_path" == "$baseline_path" ]]
+          [[ "$added_lines" =~ ^[0-9]+$ ]]
+          [[ "$deleted_lines" =~ ^[0-9]+$ ]]
+
+          after_sha256="$(sha256sum "$baseline_path" | awk '{print $1}')"
+          changed_modules="$({
+            git diff HEAD --unified=0 -- "$baseline_path" \
+              | sed -n -E 's/^[+-][0-9a-f]{64}  module\/(.*)$/\1/p'
+          } | sort -u | jq -R . | jq -s .)"
+          [[ "$(jq 'length' <<<"$changed_modules")" -gt 0 ]]
+
+          if [[ -e "$artifact_dir" ]]; then
+            echo "SDK baseline generator created the artifact staging path" >&2
+            exit 1
+          fi
+          upstream_main_before_artifact="$(git ls-remote https://github.com/openclaw/openclaw.git refs/heads/main | awk '{print $1}')"
+          main_before_artifact_queried_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [[ "$upstream_main_before_artifact" != "$EXPECTED_MAIN" ]]; then
+            echo "upstream main changed before artifact staging" >&2
+            exit 1
+          fi
+
+          mkdir -p "$artifact_dir"
+          cp "$baseline_path" "$artifact_dir/plugin-sdk-api-baseline.sha256"
+          jq -n \
+            --arg afterSha256 "$after_sha256" \
+            --arg beforeSha256 "$before_sha256" \
+            --arg evidenceTipSha "$EVIDENCE_SHA" \
+            --arg evidenceParentSha "$EVIDENCE_PARENT" \
+            --arg forkProductHeadSha "$FORK_PRODUCT_HEAD" \
+            --arg headSha "$EXPECTED_HEAD" \
+            --arg liveMergeRefSha "$LIVE_MERGE_REF" \
+            --arg mainSha "$EXPECTED_MAIN" \
+            --arg mainBeforeArtifactObservedSha "$upstream_main_before_artifact" \
+            --arg mainBeforeArtifactQueriedAt "$main_before_artifact_queried_at" \
+            --arg mainStartObservedSha "$UPSTREAM_MAIN_AT_START" \
+            --arg mainStartQueriedAt "$MAIN_START_QUERIED_AT" \
+            --arg mergeBaseSha "$MERGE_BASE" \
+            --arg jobKey "$GITHUB_JOB" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg syntheticMergeSha "$SYNTHETIC_MERGE" \
+            --arg syntheticTreeSha "$SYNTHETIC_TREE" \
+            --arg upstreamHeadSha "$UPSTREAM_HEAD" \
+            --argjson addedLines "$added_lines" \
+            --argjson changedModules "$changed_modules" \
+            --argjson deletedLines "$deleted_lines" \
+            '{
+              baselineAfterSha256: $afterSha256,
+              baselineBeforeSha256: $beforeSha256,
+              baselinePath: "docs/.generated/plugin-sdk-api-baseline.sha256",
+              changedFiles: ["docs/.generated/plugin-sdk-api-baseline.sha256"],
+              changedModules: $changedModules,
+              dataClassification: "public-hashes-and-commit-metadata",
+              diffNumstat: {added: $addedLines, deleted: $deletedLines},
+              evidenceChangedFiles: [".github/workflows/ci.yml"],
+              evidenceParentSha: $evidenceParentSha,
+              evidenceTipSha: $evidenceTipSha,
+              forkProductHeadSha: $forkProductHeadSha,
+              generatorCommand: "pnpm plugin-sdk:api:gen",
+              headSha: $headSha,
+              installMode: "secretless-frozen-no-cache",
+              jobKey: $jobKey,
+              liveMergeRefShaObservedNotUsed: $liveMergeRefSha,
+              mainSha: $mainSha,
+              mainRefObservedAtStartSha: $mainStartObservedSha,
+              mainRefObservedBeforeArtifactSha: $mainBeforeArtifactObservedSha,
+              mainRefStartQueriedAt: $mainStartQueriedAt,
+              mainRefBeforeArtifactQueriedAt: $mainBeforeArtifactQueriedAt,
+              mergeBaseSha: $mergeBaseSha,
+              mergeSource: "synthetic-first-parent-main-not-live-merge-ref",
+              repository: $repository,
+              redactionAudit: "full-byte-artifact-tree-authentication-material-scan",
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              status: "pass",
+              syntheticMergeParents: [$mainSha, $headSha],
+              syntheticMergeSha: $syntheticMergeSha,
+              syntheticTreeSha: $syntheticTreeSha,
+              upstreamHeadSha: $upstreamHeadSha
+            }' > "$artifact_dir/identity.json"
+
+      - name: Revalidate locked refs before artifact upload
+        env:
+          EXPECTED_HEAD: ${{ inputs.sdk_baseline_codegen_head }}
+          EXPECTED_MAIN: ${{ inputs.sdk_baseline_codegen_main }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=artifacts/pr-116382-sdk-baseline
+          identity_path="$artifact_dir/identity.json"
+          manifest_path="$artifact_dir/plugin-sdk-api-baseline.sha256"
+
+          mapfile -d '' -t artifact_entries < <(find "$artifact_dir" -mindepth 1 -print0 | sort -z)
+          [[ "${#artifact_entries[@]}" -eq 2 ]]
+          [[ "${artifact_entries[0]}" == "$identity_path" ]]
+          [[ "${artifact_entries[1]}" == "$manifest_path" ]]
+          jq -e \
+            --arg head "$EXPECTED_HEAD" \
+            --arg main "$EXPECTED_MAIN" \
+            '.status == "pass" and .headSha == $head and .mainSha == $main' \
+            "$identity_path" >/dev/null
+
+          upstream_main_before_upload="$(git ls-remote https://github.com/openclaw/openclaw.git refs/heads/main | awk '{print $1}')"
+          upstream_head_before_upload="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head_before_upload="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+          final_refs_queried_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [[ "$upstream_main_before_upload" != "$EXPECTED_MAIN" ]]; then
+            echo "upstream main changed before artifact upload" >&2
+            exit 1
+          fi
+          if [[ "$upstream_head_before_upload" != "$EXPECTED_HEAD" ]]; then
+            echo "upstream PR head changed before artifact upload" >&2
+            exit 1
+          fi
+          if [[ "$fork_product_head_before_upload" != "$EXPECTED_HEAD" ]]; then
+            echo "fork product head changed before artifact upload" >&2
+            exit 1
+          fi
+
+          identity_tmp="$(mktemp)"
+          trap 'rm -f "$identity_tmp"' EXIT
+          jq \
+            --arg finalRefsQueriedAt "$final_refs_queried_at" \
+            --arg forkProductHeadBeforeUploadSha "$fork_product_head_before_upload" \
+            --arg mainBeforeUploadSha "$upstream_main_before_upload" \
+            --arg upstreamHeadBeforeUploadSha "$upstream_head_before_upload" \
+            '. + {
+              finalRefFreshnessGate: "exact-live-main-and-product-heads-before-upload",
+              finalRefsQueriedAt: $finalRefsQueriedAt,
+              forkProductHeadBeforeUploadSha: $forkProductHeadBeforeUploadSha,
+              mainRefObservedBeforeUploadSha: $mainBeforeUploadSha,
+              upstreamHeadBeforeUploadSha: $upstreamHeadBeforeUploadSha
+            }' \
+            "$identity_path" > "$identity_tmp"
+          mv "$identity_tmp" "$identity_path"
+
+          mapfile -d '' -t artifact_files < <(find "$artifact_dir" -type f -print0 | sort -z)
+          [[ "${#artifact_files[@]}" -eq 2 ]]
+          sensitive_patterns=(
+            '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+            '(^|[^[:alnum:]_-])"?(authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|gateway[-_]?token|token|client[-_]?secret|secret|password|passwd|cookie|set[-_]?cookie|private[-_]?key)"?[[:space:]]*[:=]'
+            '(^|[^[:alnum:]_])Basic[[:space:]]+[A-Za-z0-9+/]{8,}={0,2}([^[:alnum:]+/=]|$)'
+            '(^|[^[:alnum:]_])Bearer[[:space:]]+[A-Za-z0-9._~+/-]{8,}'
+            '(AKIA|ASIA)[0-9A-Z]{16}'
+            'github_pat_[A-Za-z0-9_]{20,}'
+            'gh[pousr]_[A-Za-z0-9]{20,}'
+            'sk-[A-Za-z0-9_-]{20,}'
+          )
+          for pattern in "${sensitive_patterns[@]}"; do
+            if LC_ALL=C grep -a -E -i -l -- "$pattern" "${artifact_files[@]}" \
+              >/dev/null 2>&1; then
+              grep_status=0
+            else
+              grep_status=$?
+            fi
+            case "$grep_status" in
+              0)
+                echo "generated baseline artifact failed authentication-material scan" >&2
+                exit 1
+                ;;
+              1) ;;
+              *)
+                echo "generated baseline artifact scan failed to run" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "full-byte generated artifact redaction audit passed"
+
+          (
+            cd "$artifact_dir"
+            sha256sum identity.json plugin-sdk-api-baseline.sha256 > SHA256SUMS
+            [[ "$(wc -l < SHA256SUMS | tr -d ' ')" == "2" ]]
+            sha256sum --check SHA256SUMS
+          )
+          mapfile -d '' -t final_artifact_entries < <(find "$artifact_dir" -mindepth 1 -print0 | sort -z)
+          [[ "${#final_artifact_entries[@]}" -eq 3 ]]
+          [[ "${final_artifact_entries[0]}" == "$artifact_dir/SHA256SUMS" ]]
+          [[ "${final_artifact_entries[1]}" == "$identity_path" ]]
+          [[ "${final_artifact_entries[2]}" == "$manifest_path" ]]
+
+      - name: Upload generated SDK baseline
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-sdk-baseline-${{ inputs.sdk_baseline_codegen_main }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/pr-116382-sdk-baseline/identity.json
+            artifacts/pr-116382-sdk-baseline/plugin-sdk-api-baseline.sha256
+            artifacts/pr-116382-sdk-baseline/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Summarize generated baseline artifact
+        env:
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo "### Generated SDK baseline artifact"
+            echo
+            echo "- Artifact ID: \`$ARTIFACT_ID\`"
+            echo "- Artifact digest: \`$ARTIFACT_DIGEST\`"
+            echo "- Artifact URL: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Preflight: establish routing truth and job matrices once, then let real
   # work fan out from a single source of truth.
   preflight:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sdk_baseline_codegen) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'openclaw/openclaw') && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: 20
     outputs:
@@ -849,7 +1228,7 @@ jobs:
   security-fast:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sdk_baseline_codegen) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3623,7 +4002,7 @@ jobs:
       - macos-swift
       - ios-build
       - android
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.sdk_baseline_codegen) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
