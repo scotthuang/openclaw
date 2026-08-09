@@ -18,7 +18,7 @@ type ActiveBoundaryProjection = {
 
 type ActiveBoundaryEventType = "compaction" | "reset";
 
-export type SessionTranscriptActiveBoundary = {
+type SessionTranscriptActiveBoundary = {
   active_position: number;
   event_json: string;
   event_type: ActiveBoundaryEventType;

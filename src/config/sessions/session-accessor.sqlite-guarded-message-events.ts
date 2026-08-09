@@ -8,10 +8,10 @@ import {
   resolveSessionTranscriptGuardState,
   type SessionTranscriptGuardState,
 } from "./session-accessor.sqlite-active-boundary.js";
-// Keep the shipped event shape authoritative without reversing runtime ownership.
-// This edge is type-only; the legacy accessor delegates one-way into this module.
-import type { SessionTranscriptMessageEvent } from "./session-accessor.sqlite-active-events.js";
-import type { SessionTranscriptReadScope } from "./session-accessor.sqlite-contract.js";
+import type {
+  SessionTranscriptEventRow as SessionTranscriptMessageEvent,
+  SessionTranscriptReadScope,
+} from "./session-accessor.sqlite-contract.js";
 import {
   readVisibleMessageRange,
   resolveVisibleMessagePositions,
@@ -31,12 +31,12 @@ type SessionTranscriptGuardedFields = {
   projectionLeafEntryId: string | null;
 };
 
-export type SessionTranscriptMessageEventPageWithGuard = SessionTranscriptGuardedFields & {
+type SessionTranscriptMessageEventPageWithGuard = SessionTranscriptGuardedFields & {
   events: SessionTranscriptMessageEvent[];
   totalMessages: number;
 };
 
-export type SessionTranscriptMessageAnchorPageWithGuard =
+type SessionTranscriptMessageAnchorPageWithGuard =
   SessionTranscriptMessageEventPageWithGuard & {
     found: boolean;
     hasOverreadContext: boolean;

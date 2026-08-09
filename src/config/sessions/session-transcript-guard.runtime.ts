@@ -10,8 +10,6 @@ export {
   readSessionTranscriptMessageAnchorPageWithGuard,
   readSessionTranscriptMessageEventPageWithGuard,
   readSessionTranscriptMessageEventSnapshotWithGuard,
-  type SessionTranscriptMessageAnchorPageWithGuard,
-  type SessionTranscriptMessageEventPageWithGuard,
 } from "./session-accessor.sqlite-guarded-message-events.js";
 export type { SessionTranscriptGuardState };
 
