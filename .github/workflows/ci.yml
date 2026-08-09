@@ -38,6 +38,16 @@ on:
         required: false
         default: ""
         type: string
+      exact_format_patch:
+        description: "Run only the temporary PR #116382 exact-head formatter patch job."
+        required: false
+        default: false
+        type: boolean
+      exact_format_head:
+        description: Exact local product commit to format; must match the frozen H3pre SHA.
+        required: false
+        default: ""
+        type: string
   push:
     branches: [main]
     paths-ignore:
@@ -62,12 +72,264 @@ env:
   NODE_VERSION: "24.x"
 
 jobs:
+  exact-format-patch:
+    permissions:
+      contents: read
+    if: github.event_name == 'workflow_dispatch' && inputs.exact_format_patch
+    name: "PR #116382 exact-head format patch"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout formatter workflow tip
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          persist-credentials: false
+          submodules: false
+
+      - name: Verify workflow identity and frozen product refs
+        env:
+          EXPECTED_FORMAT_HEAD: ${{ inputs.exact_format_head }}
+          EXPECTED_PRODUCT_HEAD: 7cf8ea4b4591c1797d220beb59983b23c66f8f9e
+          WORKFLOW_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$EXPECTED_FORMAT_HEAD" == "8ba84755e8223a2bff3ce72475401e229d13f96b" ]]
+          [[ "$EXPECTED_PRODUCT_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          actual_tip="$(git rev-parse HEAD)"
+          actual_parent="$(git rev-parse HEAD^)"
+          parent_field_count="$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')"
+          format_base_parent="$(git rev-parse "$EXPECTED_FORMAT_HEAD^")"
+          format_base_parent_field_count="$(git rev-list --parents -n 1 "$EXPECTED_FORMAT_HEAD" | wc -w | tr -d ' ')"
+          upstream_pr_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+
+          [[ "$actual_tip" == "$WORKFLOW_SHA" ]]
+          [[ "$actual_parent" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ "$parent_field_count" == "2" ]]
+          [[ "$format_base_parent" == "$EXPECTED_PRODUCT_HEAD" ]]
+          [[ "$format_base_parent_field_count" == "2" ]]
+          [[ "$upstream_pr_head" == "$EXPECTED_PRODUCT_HEAD" ]]
+          [[ "$fork_product_head" == "$EXPECTED_PRODUCT_HEAD" ]]
+
+          mapfile -t workflow_files < <(git diff --name-only "$EXPECTED_FORMAT_HEAD"..HEAD | sort)
+          expected_workflow_files=(".github/workflows/ci.yml")
+          diff -u \
+            <(printf '%s\n' "${expected_workflow_files[@]}") \
+            <(printf '%s\n' "${workflow_files[@]}")
+
+          {
+            echo "FORMAT_WORKFLOW_SHA=$actual_tip"
+            echo "FORMAT_WORKFLOW_PARENT=$actual_parent"
+            echo "FORMAT_BASE_PARENT=$format_base_parent"
+          } >> "$GITHUB_ENV"
+
+      - name: Detach the exact H3pre product commit
+        env:
+          EXPECTED_FORMAT_HEAD: ${{ inputs.exact_format_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$EXPECTED_FORMAT_HEAD"
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ -z "$(git status --short)" ]]
+
+      - name: Setup frozen Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          frozen-lockfile: "true"
+          sticky-disk: "false"
+          use-actions-cache: "false"
+          save-actions-cache: "false"
+
+      - name: Produce exact seven-path format patch
+        env:
+          EXPECTED_FORMAT_HEAD: ${{ inputs.exact_format_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/pr-116382-format-h3pre"
+          format_log="$RUNNER_TEMP/pr-116382-format.log"
+          format_paths=(
+            src/config/sessions/session-accessor.sqlite-active-boundary.ts
+            src/config/sessions/session-accessor.sqlite-active-events.reconcile.test.ts
+            src/config/sessions/session-accessor.sqlite-guarded-message-events.ts
+            src/config/sessions/session-transcript-guard.runtime.ts
+            src/gateway/server-methods/chat-history-guard-error.ts
+            src/gateway/session-transcript-anchor-reader.ts
+            src/gateway/session-transcript-readers.ts
+          )
+          mapfile -t expected_paths < <(printf '%s\n' "${format_paths[@]}" | sort)
+
+          pnpm format "${format_paths[@]}" > "$format_log" 2>&1
+          echo "formatter completed; captured output withheld from the artifact"
+
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ -z "$(git diff --cached --name-only)" ]]
+          mapfile -t changed_paths < <(git diff --name-only | sort)
+          diff -u \
+            <(printf '%s\n' "${expected_paths[@]}") \
+            <(printf '%s\n' "${changed_paths[@]}")
+          mapfile -t nonignored_untracked < <(git ls-files --others --exclude-standard)
+          [[ "${#nonignored_untracked[@]}" -eq 0 ]]
+          git diff --check
+
+          mkdir -p "$artifact_dir/formatted"
+          for path in "${format_paths[@]}"; do
+            destination="$artifact_dir/formatted/$path"
+            mkdir -p "$(dirname "$destination")"
+            cp -- "$path" "$destination"
+          done
+          git diff --binary --full-index -- "${format_paths[@]}" > "$artifact_dir/format-only.patch"
+
+      - name: Finalize frozen identity, checksums, and full-byte audit
+        env:
+          EXPECTED_FORMAT_HEAD: ${{ inputs.exact_format_head }}
+          EXPECTED_PRODUCT_HEAD: 7cf8ea4b4591c1797d220beb59983b23c66f8f9e
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/pr-116382-format-h3pre"
+          format_paths=(
+            src/config/sessions/session-accessor.sqlite-active-boundary.ts
+            src/config/sessions/session-accessor.sqlite-active-events.reconcile.test.ts
+            src/config/sessions/session-accessor.sqlite-guarded-message-events.ts
+            src/config/sessions/session-transcript-guard.runtime.ts
+            src/gateway/server-methods/chat-history-guard-error.ts
+            src/gateway/session-transcript-anchor-reader.ts
+            src/gateway/session-transcript-readers.ts
+          )
+
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ "$FORMAT_WORKFLOW_PARENT" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ "$FORMAT_BASE_PARENT" == "$EXPECTED_PRODUCT_HEAD" ]]
+          [[ "$(git rev-parse "$EXPECTED_FORMAT_HEAD^")" == "$EXPECTED_PRODUCT_HEAD" ]]
+          [[ "$(git rev-list --parents -n 1 "$EXPECTED_FORMAT_HEAD" | wc -w | tr -d ' ')" == "2" ]]
+          [[ "$(git rev-parse "$FORMAT_WORKFLOW_SHA^")" == "$EXPECTED_FORMAT_HEAD" ]]
+          [[ "$(git rev-list --parents -n 1 "$FORMAT_WORKFLOW_SHA" | wc -w | tr -d ' ')" == "2" ]]
+          [[ -z "$(git diff --cached --name-only)" ]]
+          mapfile -t final_changed_paths < <(git diff --name-only | sort)
+          mapfile -t expected_changed_paths < <(printf '%s\n' "${format_paths[@]}" | sort)
+          diff -u \
+            <(printf '%s\n' "${expected_changed_paths[@]}") \
+            <(printf '%s\n' "${final_changed_paths[@]}")
+          mapfile -t nonignored_untracked < <(git ls-files --others --exclude-standard)
+          [[ "${#nonignored_untracked[@]}" -eq 0 ]]
+          git diff --check
+
+          upstream_pr_head="$(git ls-remote https://github.com/openclaw/openclaw.git refs/pull/116382/head | awk '{print $1}')"
+          fork_product_head="$(git ls-remote https://github.com/scotthuang/openclaw.git refs/heads/fix/control-ui-stale-leaf | awk '{print $1}')"
+          product_refs_queried_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [[ "$upstream_pr_head" == "$EXPECTED_PRODUCT_HEAD" ]]
+          [[ "$fork_product_head" == "$EXPECTED_PRODUCT_HEAD" ]]
+
+          expected_preidentity_artifact_paths=("format-only.patch")
+          for path in "${format_paths[@]}"; do
+            expected_preidentity_artifact_paths+=("formatted/$path")
+          done
+          mapfile -t expected_preidentity_artifact_paths < <(
+            printf '%s\n' "${expected_preidentity_artifact_paths[@]}" | sort
+          )
+          mapfile -t preidentity_artifact_paths < <(
+            cd "$artifact_dir"
+            find . -type f -printf '%P\n' | sort
+          )
+          diff -u \
+            <(printf '%s\n' "${expected_preidentity_artifact_paths[@]}") \
+            <(printf '%s\n' "${preidentity_artifact_paths[@]}")
+
+          jq -n \
+            --arg formatBaseParentSha "$FORMAT_BASE_PARENT" \
+            --arg formatBaseSha "$EXPECTED_FORMAT_HEAD" \
+            --arg forkProductHeadSha "$fork_product_head" \
+            --arg productHeadSha "$EXPECTED_PRODUCT_HEAD" \
+            --arg productRefsQueriedAt "$product_refs_queried_at" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --arg runId "$RUN_ID" \
+            --arg upstreamPrHeadSha "$upstream_pr_head" \
+            --arg workflowParentSha "$FORMAT_WORKFLOW_PARENT" \
+            --arg workflowTipSha "$FORMAT_WORKFLOW_SHA" \
+            '{
+              artifactKind: "format-only-patch",
+              changedPaths: [
+                "src/config/sessions/session-accessor.sqlite-active-boundary.ts",
+                "src/config/sessions/session-accessor.sqlite-active-events.reconcile.test.ts",
+                "src/config/sessions/session-accessor.sqlite-guarded-message-events.ts",
+                "src/config/sessions/session-transcript-guard.runtime.ts",
+                "src/gateway/server-methods/chat-history-guard-error.ts",
+                "src/gateway/session-transcript-anchor-reader.ts",
+                "src/gateway/session-transcript-readers.ts"
+              ],
+              formatBaseParentCount: 1,
+              formatBaseParentSha: $formatBaseParentSha,
+              formatBaseSha: $formatBaseSha,
+              forkProductHeadSha: $forkProductHeadSha,
+              productHeadSha: $productHeadSha,
+              productRefsQueriedAt: $productRefsQueriedAt,
+              repository: $repository,
+              runAttempt: ($runAttempt | tonumber),
+              runId: ($runId | tonumber),
+              upstreamPrHeadSha: $upstreamPrHeadSha,
+              workflowParentSha: $workflowParentSha,
+              workflowTipSha: $workflowTipSha
+            }' > "$artifact_dir/identity.json"
+
+          (
+            cd "$artifact_dir"
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          ) > "$artifact_dir/SHA256SUMS"
+          (cd "$artifact_dir" && sha256sum -c SHA256SUMS >/dev/null)
+
+          mapfile -d '' -t auditable_files < <(find "$artifact_dir" -type f -print0 | sort -z)
+          [[ "${#auditable_files[@]}" -eq 10 ]]
+          sensitive_patterns=(
+            '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+            '(^|[^[:alnum:]_-])"?(authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|gateway[-_]?token|client[-_]?secret|password|passwd|cookie|set[-_]?cookie|private[-_]?key)"?[[:space:]]*[:=]'
+            '(^|[^[:alnum:]_])Basic[[:space:]]+[A-Za-z0-9+/]{8,}={0,2}([^[:alnum:]+/=]|$)'
+            '(^|[^[:alnum:]_])Bearer[[:space:]]+[A-Za-z0-9._~+/-]{8,}'
+            '(AKIA|ASIA)[0-9A-Z]{16}'
+            'github_pat_[A-Za-z0-9_]{20,}'
+            'gh[pousr]_[A-Za-z0-9]{20,}'
+            'sk-[A-Za-z0-9_-]{20,}'
+          )
+          for pattern in "${sensitive_patterns[@]}"; do
+            if LC_ALL=C grep -a -E -i -l -- "$pattern" "${auditable_files[@]}" \
+              >/dev/null 2>&1; then
+              echo "format artifact failed the quiet authentication-material scan" >&2
+              exit 1
+            else
+              grep_status=$?
+            fi
+            [[ "$grep_status" -eq 1 ]]
+          done
+          echo "full-byte artifact scan passed (${#auditable_files[@]} files)"
+
+      - name: Upload format-only artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-116382-format-h3pre-${{ inputs.exact_format_head }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-116382-format-h3pre
+          if-no-files-found: error
+          retention-days: 14
+
   # Preflight: establish routing truth and job matrices once, then let real
   # work fan out from a single source of truth.
   preflight:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_format_patch) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'openclaw/openclaw') && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: 20
     outputs:
@@ -849,7 +1111,7 @@ jobs:
   security-fast:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.exact_format_patch) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3623,7 +3885,7 @@ jobs:
       - macos-swift
       - ios-build
       - android
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.exact_format_patch) && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
