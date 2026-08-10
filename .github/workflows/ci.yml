@@ -28,6 +28,26 @@ on:
         required: false
         default: ""
         type: string
+      exact_gateway_proof:
+        description: Run the evidence-only exact-head Gateway proof lane.
+        required: false
+        default: false
+        type: boolean
+      exact_gateway_proof_head:
+        description: Exact product PR head SHA bound to the Gateway proof.
+        required: false
+        default: ""
+        type: string
+      exact_gateway_proof_evidence:
+        description: Exact evidence commit SHA containing only the proof harness and this workflow.
+        required: false
+        default: ""
+        type: string
+      exact_gateway_proof_base:
+        description: Exact product PR base SHA used for ancestry validation.
+        required: false
+        default: ""
+        type: string
       historical_target_tag:
         description: Semver release tag authorizing compatibility fallbacks for its exact commit
         required: false
@@ -62,12 +82,252 @@ env:
   NODE_VERSION: "24.x"
 
 jobs:
+  exact-gateway-proof:
+    if: github.event_name == 'workflow_dispatch' && inputs.exact_gateway_proof
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout evidence commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify exact-head evidence identity
+        env:
+          EXPECTED_BASE: ${{ inputs.exact_gateway_proof_base }}
+          EXPECTED_EVIDENCE: ${{ inputs.exact_gateway_proof_evidence }}
+          EXPECTED_HEAD: ${{ inputs.exact_gateway_proof_head }}
+          EXPECTED_PR: ${{ inputs.pull_request_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          full_sha='^[0-9a-f]{40}$'
+          for value in "$EXPECTED_BASE" "$EXPECTED_EVIDENCE" "$EXPECTED_HEAD"; do
+            [[ "$value" =~ $full_sha ]] || { echo "exact proof requires full SHAs" >&2; exit 1; }
+          done
+          [[ "$EXPECTED_PR" == "121332" ]] || { echo "exact proof is bound to PR 121332" >&2; exit 1; }
+          [[ "$GITHUB_SHA" == "$EXPECTED_EVIDENCE" ]] || { echo "workflow SHA is not evidence SHA" >&2; exit 1; }
+
+          parent_line="$(git rev-list --parents -n 1 "$EXPECTED_EVIDENCE")"
+          read -r -a parent_fields <<<"$parent_line"
+          [[ "${#parent_fields[@]}" == 2 ]] || { echo "evidence commit must have one parent" >&2; exit 1; }
+          [[ "${parent_fields[1]}" == "$EXPECTED_HEAD" ]] || { echo "evidence parent is not product head" >&2; exit 1; }
+          [[ "$(git merge-base "$EXPECTED_HEAD" "$EXPECTED_EVIDENCE")" == "$EXPECTED_HEAD" ]]
+
+          git remote add upstream https://github.com/openclaw/openclaw.git
+          git fetch --no-tags --no-recurse-submodules --depth=8 upstream "$EXPECTED_BASE" "$EXPECTED_HEAD"
+          [[ "$(git merge-base "$EXPECTED_BASE" "$EXPECTED_HEAD")" == "$EXPECTED_BASE" ]] || {
+            echo "declared base is not an ancestor of product head" >&2
+            exit 1
+          }
+          live_head="$(git ls-remote upstream refs/pull/121332/head | awk '{print $1}')"
+          [[ "$live_head" == "$EXPECTED_HEAD" ]] || { echo "live PR head moved" >&2; exit 1; }
+          live_evidence="$(git ls-remote origin "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')"
+          [[ "$live_evidence" == "$EXPECTED_EVIDENCE" ]] || { echo "fork evidence ref moved" >&2; exit 1; }
+
+          mapfile -t changed < <(git diff --name-only "$EXPECTED_HEAD" "$EXPECTED_EVIDENCE" | sort)
+          expected=(.github/workflows/ci.yml test/pr121332-exact-head-proof.e2e.test.ts)
+          [[ "${changed[*]}" == "${expected[*]}" ]] || {
+            printf 'evidence allowlist mismatch: %s\n' "${changed[*]}" >&2
+            exit 1
+          }
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: "false"
+          sticky-disk: "false"
+          use-actions-cache: "false"
+
+      - name: Run real Gateway proof
+        id: proof
+        continue-on-error: true
+        env:
+          OPENCLAW_PR_121332_BASE: ${{ inputs.exact_gateway_proof_base }}
+          OPENCLAW_PR_121332_EVIDENCE_SHA: ${{ inputs.exact_gateway_proof_evidence }}
+          OPENCLAW_PR_121332_HEAD: ${{ inputs.exact_gateway_proof_head }}
+          OPENCLAW_PR_121332_PROOF_DIR: ${{ runner.temp }}/pr121332-exact-head-proof
+        run: node scripts/run-vitest.mjs test/pr121332-exact-head-proof.e2e.test.ts
+
+      - name: Finalize and redact proof artifact
+        id: finalize
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/pr121332-exact-head-proof
+          SAFE_DIAGNOSTIC_DIR: ${{ runner.temp }}/pr121332-exact-head-diagnostic
+          EXPECTED_BASE: ${{ inputs.exact_gateway_proof_base }}
+          EXPECTED_EVIDENCE: ${{ inputs.exact_gateway_proof_evidence }}
+          EXPECTED_HEAD: ${{ inputs.exact_gateway_proof_head }}
+          PROOF_OUTCOME: ${{ steps.proof.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const dir = process.env.ARTIFACT_DIR;
+          const safeDir = process.env.SAFE_DIAGNOSTIC_DIR;
+          fs.mkdirSync(dir, { recursive: true });
+          fs.mkdirSync(safeDir, { recursive: true });
+          const readJson = (name, fallback) => {
+            try { return JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")); }
+            catch { return fallback; }
+          };
+          const proofSucceeded = process.env.PROOF_OUTCOME === "success";
+          const verdict = readJson("verdict.json", {
+            status: "fail",
+            failure: "proof process exited before producing a sanitized verdict",
+          });
+          const identity = {
+            pullRequest: 121332,
+            baseSha: process.env.EXPECTED_BASE,
+            evidenceSha: process.env.EXPECTED_EVIDENCE,
+            headSha: process.env.EXPECTED_HEAD,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+          };
+          fs.writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify({
+            schemaVersion: 1,
+            proof: "pr-121332-exact-head-real-gateway-log-proof",
+            identity,
+            status: verdict.status,
+            source: "test/pr121332-exact-head-proof.e2e.test.ts",
+            boundaries: verdict.boundaries,
+            media: [],
+          }, null, 2)}\n`);
+          const rules = [
+            ["github-token", /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/u],
+            ["provider-key", /\bsk-[A-Za-z0-9_-]{16,}\b/u],
+            ["private-key", /-----BEGIN [A-Z ]+ PRIVATE KEY-----/u],
+            ["authorization", /authorization\s*[:=]/iu],
+            ["bearer", /bearer\s+[A-Za-z0-9._~-]{8,}/iu],
+            ["gateway-token", /gateway-pr121332-exact-head-proof-[0-9a-f-]{36}/u],
+            ["hook-token", /token-pr121332-exact-head-proof-[0-9a-f-]{36}/u],
+            ["absolute-runner-path", /\/(?:home\/runner|private\/(?:tmp|var\/folders)|tmp)\//u],
+          ];
+          const scan = (target) => {
+            const names = fs.readdirSync(target).filter((name) =>
+              [".json", ".ndjson"].some((suffix) => name.endsWith(suffix))
+            ).sort();
+            const text = names.map((name) => fs.readFileSync(path.join(target, name), "utf8")).join("\n");
+            const findings = rules.filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+            return { names, findings };
+          };
+          const evidenceScan = scan(dir);
+          fs.writeFileSync(path.join(dir, "redaction.json"), `${JSON.stringify({
+            status: evidenceScan.findings.length === 0 ? "pass" : "fail",
+            scannedFiles: evidenceScan.names,
+            findings: evidenceScan.findings,
+          }, null, 2)}\n`);
+
+          const sha = (buffer) => createHash("sha256").update(buffer).digest("hex");
+          const scenarios = Array.isArray(verdict.scenarios) ? verdict.scenarios : [];
+          const complete = verdict.status === "pass" && scenarios.length === 3;
+          const cleanupSource = readJson("cleanup.json", {});
+          const cleanup = Object.fromEntries([
+            "clientWebSocket",
+            "gatewayInstance",
+            "providerServer",
+            "temporaryStateRemoved",
+            "clientDeviceStateRemoved",
+          ].map((name) => [name, cleanupSource[name] === true]));
+          const reason = evidenceScan.findings.length > 0
+            ? "artifact-redaction-failed"
+            : !proofSucceeded
+              ? "proof-execution-failed"
+              : !complete
+                ? "artifact-validation-failed"
+                : "not-needed";
+          fs.writeFileSync(path.join(safeDir, "diagnostic.json"), `${JSON.stringify({
+            schemaVersion: 1,
+            status: reason === "not-needed" ? "not-needed" : "fail",
+            identity,
+            reason,
+            proofOutcome: proofSucceeded ? "success" : "failure",
+            verdictStatus: verdict.status === "pass" ? "pass" : "fail",
+            artifactRedaction: {
+              status: evidenceScan.findings.length === 0 ? "pass" : "fail",
+              findings: evidenceScan.findings,
+            },
+            cleanup,
+          }, null, 2)}\n`);
+          const diagnosticScan = scan(safeDir);
+          fs.writeFileSync(path.join(safeDir, "redaction.json"), `${JSON.stringify({
+            status: diagnosticScan.findings.length === 0 ? "pass" : "fail",
+            scannedFiles: diagnosticScan.names,
+            findings: diagnosticScan.findings,
+          }, null, 2)}\n`);
+          const diagnosticRescan = scan(safeDir);
+
+          const index = (target, names) => {
+            const indexedNames = [...names, "redaction.json"].sort();
+            const inventory = indexedNames.map((name) => {
+              const bytes = fs.readFileSync(path.join(target, name));
+              return { name, bytes: bytes.length, sha256: sha(bytes) };
+            });
+            fs.writeFileSync(path.join(target, "inventory.json"), `${JSON.stringify({ files: inventory }, null, 2)}\n`);
+            const checksumNames = [...indexedNames, "inventory.json"].sort();
+            fs.writeFileSync(path.join(target, "SHA256SUMS"), `${checksumNames.map((name) =>
+              `${sha(fs.readFileSync(path.join(target, name)))}  ${name}`
+            ).join("\n")}\n`);
+          };
+          index(dir, evidenceScan.names);
+          index(safeDir, diagnosticScan.names);
+
+          if (diagnosticRescan.findings.length > 0) {
+            throw new Error("clean failure diagnostic did not pass redaction rescan");
+          }
+          if (evidenceScan.findings.length > 0) {
+            throw new Error(`redaction findings: ${evidenceScan.findings.join(",")}`);
+          }
+          if (proofSucceeded && !complete) {
+            throw new Error("successful proof process produced an incomplete verdict");
+          }
+          NODE
+
+      - name: Upload authoritative proof
+        if: always() && steps.proof.outcome == 'success' && steps.finalize.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-121332-exact-head-${{ inputs.exact_gateway_proof_head }}-${{ inputs.exact_gateway_proof_evidence }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr121332-exact-head-proof
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: false
+          retention-days: 14
+
+      - name: Upload sanitized failure diagnostic
+        if: always() && (steps.proof.outcome != 'success' || steps.finalize.outcome != 'success')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-121332-exact-head-diagnostic-${{ inputs.exact_gateway_proof_head }}-${{ inputs.exact_gateway_proof_evidence }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr121332-exact-head-diagnostic
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: false
+          retention-days: 14
+
+      - name: Enforce proof result
+        if: always()
+        env:
+          FINALIZE_OUTCOME: ${{ steps.finalize.outcome }}
+          PROOF_OUTCOME: ${{ steps.proof.outcome }}
+        run: |
+          test "$PROOF_OUTCOME" = success
+          test "$FINALIZE_OUTCOME" = success
+
   # Preflight: establish routing truth and job matrices once, then let real
   # work fan out from a single source of truth.
   preflight:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && !(github.event_name == 'workflow_dispatch' && inputs.exact_gateway_proof)
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'openclaw/openclaw') && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: 20
     outputs:
@@ -849,7 +1109,7 @@ jobs:
   security-fast:
     permissions:
       contents: read
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft) && !(github.event_name == 'workflow_dispatch' && inputs.exact_gateway_proof)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -3666,7 +3926,7 @@ jobs:
       - macos-swift
       - ios-build
       - android
-    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && !(github.event_name == 'workflow_dispatch' && inputs.exact_gateway_proof) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
