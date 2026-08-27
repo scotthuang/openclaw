@@ -62,6 +62,7 @@ type HeartbeatTargetProjection = {
   sessionKey: string;
   storePath: string;
   expectedSessionId: string;
+  expectedLifecycleRevision: string | undefined;
   idempotencyKey: string;
 };
 
@@ -89,6 +90,7 @@ function resolveHeartbeatTargetProjection(params: {
       sessionKey,
       storePath: params.storePath,
       expectedSessionId: entry.sessionId,
+      expectedLifecycleRevision: entry.lifecycleRevision,
       idempotencyKey: `${HEARTBEAT_DELIVERY_CONTEXT_KEY_PREFIX}${params.startedAt}:${params.runSessionKey}`,
     };
   } catch (error) {
@@ -104,13 +106,16 @@ function queueHeartbeatTargetAwareness(params: {
   payloads: readonly NormalizedOutboundPayload[];
 }) {
   try {
-    // Recheck the exact pre-send session before publishing awareness. A reset
-    // must not attach an old delivery to the replacement conversation.
+    // Recheck the exact pre-send lifecycle before publishing awareness. Resets
+    // can preserve sessionId while rotating lifecycleRevision.
     const latest = loadExactSessionEntryReadOnly({
       storePath: params.projection.storePath,
       sessionKey: params.projection.sessionKey,
     })?.entry;
-    if (latest?.sessionId !== params.projection.expectedSessionId) {
+    if (
+      latest?.sessionId !== params.projection.expectedSessionId ||
+      latest.lifecycleRevision !== params.projection.expectedLifecycleRevision
+    ) {
       return;
     }
     const deliveredText = resolveMirroredTranscriptText({
@@ -501,7 +506,6 @@ export async function finalizeHeartbeatOutcome(params: {
     targetSessionKey: delivery.targetSessionKey,
     startedAt,
   });
-  const deliveredPayloads: NormalizedOutboundPayload[] = [];
   const send = await sendDurableMessageBatchCore({
     cfg,
     channel: delivery.channel,
@@ -519,16 +523,16 @@ export async function finalizeHeartbeatOutcome(params: {
     ],
     deps: params.opts.deps,
     silent: normalized.silent,
-    onDeliveredPayload: (payload) => deliveredPayloads.push(payload),
+    onDeliveredPayload: targetProjection
+      ? (payload) =>
+          queueHeartbeatTargetAwareness({ projection: targetProjection, payloads: [payload] })
+      : undefined,
   });
   if (send.status === "failed" || send.status === "partial_failed") {
     throw send.error;
   }
   const visibleSendSucceeded = send.status === "sent";
   if (visibleSendSucceeded) {
-    if (targetProjection) {
-      queueHeartbeatTargetAwareness({ projection: targetProjection, payloads: deliveredPayloads });
-    }
     const hasHeartbeatText = Boolean(deliveryText.trim());
     await patchSessionEntryCore(
       { storePath, sessionKey },
