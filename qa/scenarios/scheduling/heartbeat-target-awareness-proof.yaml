@@ -1,0 +1,276 @@
+title: Heartbeat target-session awareness exact-head proof
+
+scenario:
+  id: heartbeat-target-awareness-proof
+  surface: cron
+  category: automation.heartbeat
+  coverage:
+    secondary:
+      - automation.wake-and-cooldown-handling
+      - channels.qa-channel-final-reply
+  regressionRefs:
+    - openclaw/openclaw#130871
+  gatewayConfigPatch:
+    session:
+      dmScope: per-channel-peer
+    agents:
+      defaults:
+        heartbeat:
+          every: 24h
+          target: qa-channel
+          to: dm:qa-heartbeat-target-awareness-proof
+          directPolicy: allow
+          isolatedSession: true
+          prompt: "Heartbeat target awareness proof. Reply exactly: QA-HEARTBEAT-TARGET-ALERT"
+  objective: Prove one delivered isolated heartbeat is projected into the exact target session before its immediate next ordinary turn and is not queued again.
+  successCriteria:
+    - A seed turn creates the canonical qa-channel target session through a real ephemeral Gateway.
+    - An isolated heartbeat uses a distinct run session and delivers exactly one alert to that target.
+    - The immediate next ordinary target turn sees exactly one bounded heartbeat-awareness event.
+    - A following ordinary turn sees no queued copy, while the target session id remains unchanged.
+  docsRefs:
+    - docs/gateway/heartbeat.md
+    - docs/channels/qa-channel.md
+  codeRefs:
+    - src/infra/heartbeat-runner-delivery.ts
+    - src/infra/outbound/targets.ts
+    - src/auto-reply/reply/session-system-events.ts
+    - extensions/qa-channel/src/channel.ts
+  execution:
+    kind: flow
+    suiteIsolation: isolated
+    isolationReason: Configures isolated heartbeat delivery and forces an immediate wake through a real Gateway child.
+    channel: qa-channel
+    retryCount: 0
+    timeoutMs: 180000
+    summary: Exercise seed, heartbeat delivery, immediate awareness, and one-shot consumption as one continuous Gateway flow.
+    config:
+      requiredProviderMode: mock-openai
+      conversationId: qa-heartbeat-target-awareness-proof
+      seedPromptNeedle: Seed heartbeat target awareness session
+      seedMarker: QA-HEARTBEAT-TARGET-SEED-OK
+      heartbeatPromptNeedle: Heartbeat target awareness proof
+      heartbeatMarker: QA-HEARTBEAT-TARGET-ALERT
+      turnOnePromptNeedle: Immediate heartbeat awareness turn
+      turnOneMarker: QA-HEARTBEAT-TARGET-TURN-ONE-OK
+      turnTwoPromptNeedle: Follow-up heartbeat awareness turn
+      turnTwoMarker: QA-HEARTBEAT-TARGET-TURN-TWO-OK
+      awarenessPrefix: "A heartbeat delivered this message to this channel:"
+
+flow:
+  steps:
+    - name: delivers once and projects into the immediate target turn
+      actions:
+        - assert:
+            expr: "env.providerMode === config.requiredProviderMode"
+            message: heartbeat target-awareness proof requires mock-openai
+        - call: waitForGatewayHealthy
+          args:
+            - ref: env
+            - 60000
+        - call: waitForQaChannelReady
+          args:
+            - ref: env
+            - 60000
+        - call: reset
+        - set: target
+          value:
+            expr: "`dm:${config.conversationId}`"
+        - set: targetSessionKey
+          value:
+            expr: "buildAgentSessionKey({ agentId: 'qa', channel: 'qa-channel', accountId: transport.accountId, peer: { kind: 'direct', id: target }, dmScope: 'per-channel-peer', identityLinks: env.cfg.session?.identityLinks })"
+        - set: heartbeatSessionKey
+          value: agent:qa:main:heartbeat
+        - set: seedRequestCursor
+          value:
+            expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
+        - sendInbound:
+            conversation:
+              id:
+                ref: config.conversationId
+              kind: direct
+              title: QA Heartbeat Awareness Target
+            senderId: qa-heartbeat-awareness-user
+            senderName: QA Heartbeat Awareness User
+            text:
+              expr: "`${config.seedPromptNeedle}. Reply exactly: ${config.seedMarker}`"
+          saveAs: seedInbound
+        - call: waitForCondition
+          saveAs: seedRequest
+          args:
+            - lambda:
+                async: true
+                expr: "(await fetchJson(`${env.mock.baseUrl}/debug/requests?after=${seedRequestCursor}`)).find((request) => String(request.allInputText ?? '').includes(config.seedPromptNeedle))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - call: waitForOutboundMessage
+          saveAs: seedOutbound
+          args:
+            - ref: state
+            - lambda:
+                params: [candidate]
+                expr: "candidate.direction === 'outbound' && candidate.conversation.kind === 'direct' && candidate.conversation.id === config.conversationId && String(candidate.text ?? '').trim() === config.seedMarker"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+        - call: waitForCondition
+          saveAs: targetBefore
+          args:
+            - lambda:
+                async: true
+                expr: "env.gateway.call('sessions.list', {}, { timeoutMs: 30000 }).then((result) => result.sessions?.find((session) => session.key === targetSessionKey && session.hasActiveRun === false && typeof session.sessionId === 'string'))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - set: heartbeatRequestCursor
+          value:
+            expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
+        - call: env.gateway.call
+          saveAs: wakeResponse
+          args:
+            - wake
+            - mode: now
+              text: Run the heartbeat target-awareness exact-head proof now.
+              agentId: qa
+            - timeoutMs: 30000
+        - assert:
+            expr: "wakeResponse?.ok === true"
+            message:
+              expr: "`expected wake RPC success, got ${JSON.stringify(wakeResponse)}`"
+        - call: waitForCondition
+          saveAs: heartbeatRequest
+          args:
+            - lambda:
+                async: true
+                expr: "(await fetchJson(`${env.mock.baseUrl}/debug/requests?after=${heartbeatRequestCursor}`)).find((request) => String(request.allInputText ?? '').includes(config.heartbeatPromptNeedle))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - call: waitForOutboundMessage
+          saveAs: heartbeatOutbound
+          args:
+            - ref: state
+            - lambda:
+                params: [candidate]
+                expr: "candidate.direction === 'outbound' && candidate.conversation.kind === 'direct' && candidate.conversation.id === config.conversationId && String(candidate.text ?? '').includes(config.heartbeatMarker)"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+        - call: waitForCondition
+          saveAs: heartbeatSession
+          args:
+            - lambda:
+                async: true
+                expr: "env.gateway.call('sessions.list', {}, { timeoutMs: 30000 }).then((result) => result.sessions?.find((session) => session.key === heartbeatSessionKey && session.hasActiveRun === false && typeof session.sessionId === 'string'))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - call: env.gateway.call
+          saveAs: sessionsAfterHeartbeat
+          args:
+            - sessions.list
+            - {}
+            - timeoutMs: 30000
+        - set: targetAfterHeartbeat
+          value:
+            expr: "sessionsAfterHeartbeat.sessions.find((session) => session.key === targetSessionKey)"
+        - assert:
+            expr: "targetAfterHeartbeat?.sessionId === targetBefore.sessionId && heartbeatSession.sessionId !== targetBefore.sessionId"
+            message:
+              expr: "`heartbeat did not preserve the target lifecycle or use a distinct run session: ${JSON.stringify({ targetBefore, targetAfterHeartbeat, heartbeatSession })}`"
+        - set: turnOneRequestCursor
+          value:
+            expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
+        - sendInbound:
+            conversation:
+              id:
+                ref: config.conversationId
+              kind: direct
+              title: QA Heartbeat Awareness Target
+            senderId: qa-heartbeat-awareness-user
+            senderName: QA Heartbeat Awareness User
+            text:
+              expr: "`${config.turnOnePromptNeedle}. Reply exactly: ${config.turnOneMarker}`"
+          saveAs: turnOneInbound
+        - call: waitForCondition
+          saveAs: turnOneRequest
+          args:
+            - lambda:
+                async: true
+                expr: "(await fetchJson(`${env.mock.baseUrl}/debug/requests?after=${turnOneRequestCursor}`)).find((request) => String(request.allInputText ?? '').includes(config.turnOnePromptNeedle))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - call: waitForOutboundMessage
+          saveAs: turnOneOutbound
+          args:
+            - ref: state
+            - lambda:
+                params: [candidate]
+                expr: "candidate.direction === 'outbound' && candidate.conversation.kind === 'direct' && candidate.conversation.id === config.conversationId && String(candidate.text ?? '').trim() === config.turnOneMarker"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+        - set: turnOneAwarenessPrefixCount
+          value:
+            expr: "String(turnOneRequest.allInputText ?? '').split(config.awarenessPrefix).length - 1"
+        - set: turnOneHeartbeatMarkerCount
+          value:
+            expr: "String(turnOneRequest.allInputText ?? '').split(config.heartbeatMarker).length - 1"
+        - assert:
+            expr: "turnOneAwarenessPrefixCount === 1 && turnOneHeartbeatMarkerCount === 1"
+            message:
+              expr: "`immediate ordinary turn did not receive exactly one heartbeat awareness event: ${JSON.stringify({ turnOneAwarenessPrefixCount, turnOneHeartbeatMarkerCount, providerCursor: turnOneRequest.cursor })}`"
+        - call: waitForCondition
+          args:
+            - lambda:
+                async: true
+                expr: "env.gateway.call('sessions.list', {}, { timeoutMs: 30000 }).then((result) => result.sessions?.find((session) => session.key === targetSessionKey && session.hasActiveRun === false))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - set: turnTwoRequestCursor
+          value:
+            expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
+        - sendInbound:
+            conversation:
+              id:
+                ref: config.conversationId
+              kind: direct
+              title: QA Heartbeat Awareness Target
+            senderId: qa-heartbeat-awareness-user
+            senderName: QA Heartbeat Awareness User
+            text:
+              expr: "`${config.turnTwoPromptNeedle}. Reply exactly: ${config.turnTwoMarker}`"
+          saveAs: turnTwoInbound
+        - call: waitForCondition
+          saveAs: turnTwoRequest
+          args:
+            - lambda:
+                async: true
+                expr: "(await fetchJson(`${env.mock.baseUrl}/debug/requests?after=${turnTwoRequestCursor}`)).find((request) => String(request.allInputText ?? '').includes(config.turnTwoPromptNeedle))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - call: waitForOutboundMessage
+          saveAs: turnTwoOutbound
+          args:
+            - ref: state
+            - lambda:
+                params: [candidate]
+                expr: "candidate.direction === 'outbound' && candidate.conversation.kind === 'direct' && candidate.conversation.id === config.conversationId && String(candidate.text ?? '').trim() === config.turnTwoMarker"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+        - set: turnTwoAwarenessPrefixCount
+          value:
+            expr: "String(turnTwoRequest.allInputText ?? '').split(config.awarenessPrefix).length - 1"
+        - set: turnTwoHeartbeatMarkerCount
+          value:
+            expr: "String(turnTwoRequest.allInputText ?? '').split(config.heartbeatMarker).length - 1"
+        - assert:
+            expr: "turnTwoAwarenessPrefixCount === 0 && turnTwoHeartbeatMarkerCount === 0"
+            message:
+              expr: "`following ordinary turn received a queued duplicate: ${JSON.stringify({ turnTwoAwarenessPrefixCount, turnTwoHeartbeatMarkerCount, providerCursor: turnTwoRequest.cursor })}`"
+        - call: waitForCondition
+          saveAs: targetAfter
+          args:
+            - lambda:
+                async: true
+                expr: "env.gateway.call('sessions.list', {}, { timeoutMs: 30000 }).then((result) => result.sessions?.find((session) => session.key === targetSessionKey && session.hasActiveRun === false))"
+            - expr: "liveTurnTimeoutMs(env, 60000)"
+            - 100
+        - set: heartbeatDeliveries
+          value:
+            expr: "state.getSnapshot().messages.filter((message) => message.direction === 'outbound' && message.conversation.kind === 'direct' && message.conversation.id === config.conversationId && String(message.text ?? '').includes(config.heartbeatMarker))"
+        - assert:
+            expr: "targetAfter.sessionId === targetBefore.sessionId && heartbeatDeliveries.length === 1"
+            message:
+              expr: "`target session changed or heartbeat delivered more than once: ${JSON.stringify({ before: targetBefore.sessionId, after: targetAfter.sessionId, heartbeatDeliveries: heartbeatDeliveries.map((message) => message.id) })}`"
+      detailsExpr: "JSON.stringify({ verdict: 'PASS', scenario: scenario.id, boundaries: { gateway: 'real-ephemeral-child', channel: 'synthetic-qa-channel-http-bus', provider: env.providerMode }, trace: { seed: { inboundMessageId: seedInbound.id, outboundMessageId: seedOutbound.id, providerCursor: seedRequest.cursor }, heartbeat: { wakeAccepted: wakeResponse.ok, outboundMessageId: heartbeatOutbound.id, providerCursor: heartbeatRequest.cursor, deliveryCount: heartbeatDeliveries.length, runSessionKey: heartbeatSessionKey, runSessionId: heartbeatSession.sessionId }, immediateTurn: { inboundMessageId: turnOneInbound.id, outboundMessageId: turnOneOutbound.id, providerCursor: turnOneRequest.cursor, awarenessPrefixCount: turnOneAwarenessPrefixCount, heartbeatMarkerCount: turnOneHeartbeatMarkerCount }, followingTurn: { inboundMessageId: turnTwoInbound.id, outboundMessageId: turnTwoOutbound.id, providerCursor: turnTwoRequest.cursor, awarenessPrefixCount: turnTwoAwarenessPrefixCount, heartbeatMarkerCount: turnTwoHeartbeatMarkerCount } }, target: { sessionKey: targetSessionKey, sessionIdBefore: targetBefore.sessionId, sessionIdAfterHeartbeat: targetAfterHeartbeat.sessionId, sessionIdAfter: targetAfter.sessionId } }, null, 2)"

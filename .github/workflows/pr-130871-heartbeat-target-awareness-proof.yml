@@ -1,0 +1,457 @@
+name: PR 130871 heartbeat target-awareness exact-head proof
+
+on:
+  push:
+    branches:
+      - proof/heartbeat-target-awareness-d6b6e661
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-130871-heartbeat-target-awareness-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    name: Exact-head Gateway behavior proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PRODUCT_H: d6b6e661864b859b90689b6c95da9476d3ad37ad
+      TARGET_PR: "130871"
+      SCENARIO_ID: heartbeat-target-awareness-proof
+      EVIDENCE_DIR: proof-artifacts/exact-head-pr-130871
+      WORKFLOW_PATH: .github/workflows/pr-130871-heartbeat-target-awareness-proof.yml
+      SCENARIO_PATH: qa/scenarios/scheduling/heartbeat-target-awareness-proof.yaml
+
+    steps:
+      - name: Checkout evidence commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Bind evidence commit to the live product head
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_sha="$(git rev-parse HEAD)"
+          if [[ "$evidence_sha" != "$GITHUB_SHA" ]]; then
+            echo "Checked-out evidence commit does not match the push event SHA." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REPOSITORY" != "scotthuang/openclaw" ]]; then
+            echo "Proof must run from the declared secretless fork." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/proof/heartbeat-target-awareness-d6b6e661" ]]; then
+            echo "Unexpected evidence branch ref: $GITHUB_REF" >&2
+            exit 1
+          fi
+          parent_line="$(git rev-list --parents -n 1 "$evidence_sha")"
+          read -r -a parent_fields <<< "$parent_line"
+          if [[ "${#parent_fields[@]}" -ne 2 ]]; then
+            echo "Evidence commit must have exactly one parent." >&2
+            exit 1
+          fi
+          parent_sha="${parent_fields[1]}"
+          if [[ "$parent_sha" != "$PRODUCT_H" ]]; then
+            echo "Evidence parent mismatch: expected $PRODUCT_H, got $parent_sha" >&2
+            exit 1
+          fi
+          if [[ "$(git merge-base "$PRODUCT_H" "$evidence_sha")" != "$PRODUCT_H" ]]; then
+            echo "Product commit is not the merge base of the evidence commit." >&2
+            exit 1
+          fi
+
+          mapfile -t changed_paths < <(git diff --name-only "$PRODUCT_H" "$evidence_sha" | sort)
+          expected_paths=("$WORKFLOW_PATH" "$SCENARIO_PATH")
+          mapfile -t expected_paths < <(printf '%s\n' "${expected_paths[@]}" | sort)
+          if [[ "${changed_paths[*]}" != "${expected_paths[*]}" ]]; then
+            echo "Evidence diff escaped the two-file allowlist." >&2
+            printf 'changed: %s\n' "${changed_paths[@]}" >&2
+            exit 1
+          fi
+          mapfile -t changed_entries < <(git diff --name-status "$PRODUCT_H" "$evidence_sha" | sort)
+          expected_entries=($'A\t'"$WORKFLOW_PATH" $'A\t'"$SCENARIO_PATH")
+          mapfile -t expected_entries < <(printf '%s\n' "${expected_entries[@]}" | sort)
+          if [[ "${changed_entries[*]}" != "${expected_entries[*]}" ]]; then
+            echo "Both evidence files must be newly added." >&2
+            printf 'changed entry: %s\n' "${changed_entries[@]}" >&2
+            exit 1
+          fi
+          for evidence_path in "${expected_paths[@]}"; do
+            tree_entry="$(git ls-tree "$evidence_sha" -- "$evidence_path")"
+            read -r tree_mode tree_type _tree_object tree_path <<< "$tree_entry"
+            if [[ "$tree_mode" != "100644" || "$tree_type" != "blob" || "$tree_path" != "$evidence_path" ]]; then
+              echo "Evidence allowlist entry must be a regular 100644 blob: $evidence_path" >&2
+              exit 1
+            fi
+          done
+
+          live_head="$(gh api "repos/openclaw/openclaw/pulls/$TARGET_PR" --jq '.head.sha')"
+          if [[ "$live_head" != "$PRODUCT_H" ]]; then
+            echo "Live PR head moved: expected $PRODUCT_H, got $live_head" >&2
+            exit 1
+          fi
+          {
+            echo "evidence_sha=$evidence_sha"
+            echo "live_head=$live_head"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node and secret scanner
+        uses: ./.github/actions/setup-node-env
+        with:
+          cache-mode: off
+          install-bun: "false"
+          install-trufflehog: "true"
+          node-version: 24.x
+
+      - name: Build private QA runtime
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+        run: pnpm build qaRuntime
+
+      - name: Run the continuous Gateway scenario once
+        id: qa
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$EVIDENCE_DIR/qa"
+          set +e
+          OPENCLAW_BUILD_PRIVATE_QA=1 \
+          OPENCLAW_ENABLE_PRIVATE_QA_CLI=1 \
+          OPENCLAW_QA_REDACT_PUBLIC_METADATA=1 \
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS=0 \
+            pnpm openclaw qa suite \
+              --provider-mode mock-openai \
+              --scenario "$SCENARIO_ID" \
+              --concurrency 1 \
+              --output-dir "$EVIDENCE_DIR/qa"
+          qa_exit_code="$?"
+          set -e
+          echo "exit_code=$qa_exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Build structured verdict and identity manifest
+        env:
+          EVIDENCE_SHA: ${{ steps.identity.outputs.evidence_sha }}
+          LIVE_HEAD_AT_START: ${{ steps.identity.outputs.live_head }}
+          QA_EXIT_CODE: ${{ steps.qa.outputs.exit_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const evidenceDir = process.env.EVIDENCE_DIR;
+          const summaryPath = path.join(evidenceDir, "qa", "qa-suite-summary.json");
+          let summary = null;
+          let trace = null;
+          let parseError = null;
+          try {
+            summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+            const scenario = summary.scenarios?.find(
+              (entry) => entry?.status === "pass" && entry?.steps?.length === 1,
+            );
+            trace = JSON.parse(scenario?.steps?.[0]?.details ?? "null");
+          } catch (error) {
+            parseError = error instanceof Error ? error.message : String(error);
+          }
+
+          const target = trace?.target ?? {};
+          const heartbeat = trace?.trace?.heartbeat ?? {};
+          const immediate = trace?.trace?.immediateTurn ?? {};
+          const following = trace?.trace?.followingTurn ?? {};
+          const acceptance = {
+            suiteCompletedOnce:
+              Number(process.env.QA_EXIT_CODE) === 0 &&
+              summary?.run?.status === "completed" &&
+              summary?.counts?.total === 1 &&
+              summary?.counts?.passed === 1 &&
+              summary?.counts?.failed === 0 &&
+              summary?.counts?.skipped === 0,
+            realEphemeralGateway:
+              trace?.boundaries?.gateway === "real-ephemeral-child" &&
+              trace?.boundaries?.channel === "synthetic-qa-channel-http-bus" &&
+              trace?.boundaries?.provider === "mock-openai",
+            targetSessionCreated:
+              typeof target.sessionKey === "string" &&
+              typeof target.sessionIdBefore === "string" &&
+              target.sessionIdBefore.length > 0,
+            heartbeatDeliveredExactlyOnce:
+              heartbeat.wakeAccepted === true &&
+              heartbeat.deliveryCount === 1 &&
+              typeof heartbeat.outboundMessageId === "string" &&
+              Number.isSafeInteger(heartbeat.providerCursor),
+            isolatedRunSessionDistinct:
+              typeof heartbeat.runSessionKey === "string" &&
+              heartbeat.runSessionKey !== target.sessionKey &&
+              typeof heartbeat.runSessionId === "string" &&
+              heartbeat.runSessionId !== target.sessionIdBefore,
+            immediateTurnAwareExactlyOnce:
+              immediate.awarenessPrefixCount === 1 &&
+              immediate.heartbeatMarkerCount === 1 &&
+              typeof immediate.inboundMessageId === "string" &&
+              typeof immediate.outboundMessageId === "string" &&
+              Number.isSafeInteger(immediate.providerCursor),
+            followingTurnHasNoQueuedDuplicate:
+              following.awarenessPrefixCount === 0 &&
+              following.heartbeatMarkerCount === 0 &&
+              typeof following.inboundMessageId === "string" &&
+              typeof following.outboundMessageId === "string" &&
+              Number.isSafeInteger(following.providerCursor),
+            targetLifecyclePreserved:
+              target.sessionIdBefore === target.sessionIdAfterHeartbeat &&
+              target.sessionIdBefore === target.sessionIdAfter,
+            exactScenarioAndCausalOrder:
+              trace?.scenario === process.env.SCENARIO_ID &&
+              summary?.run?.scenarioIds?.length === 1 &&
+              summary.run.scenarioIds[0] === process.env.SCENARIO_ID &&
+              Number.isSafeInteger(trace?.trace?.seed?.providerCursor) &&
+              trace.trace.seed.providerCursor < heartbeat.providerCursor &&
+              heartbeat.providerCursor < immediate.providerCursor &&
+              immediate.providerCursor < following.providerCursor,
+          };
+          const passed = Object.values(acceptance).every(Boolean) && trace?.verdict === "PASS";
+          const verdict = {
+            schemaVersion: 1,
+            verdict: passed ? "PASS" : "FAIL",
+            productH: process.env.PRODUCT_H,
+            evidenceE: process.env.EVIDENCE_SHA,
+            scenarioId: process.env.SCENARIO_ID,
+            acceptance,
+            boundaries: trace?.boundaries ?? null,
+            trace,
+            qaExitCode: Number(process.env.QA_EXIT_CODE),
+            parseError,
+          };
+          fs.writeFileSync(
+            path.join(evidenceDir, "verdict.json"),
+            `${JSON.stringify(verdict, null, 2)}\n`,
+            { mode: 0o600 },
+          );
+
+          const generatedAt = new Date();
+          const expiresAt = new Date(generatedAt.getTime() + 14 * 24 * 60 * 60 * 1000);
+          const manifest = {
+            schemaVersion: 1,
+            repository: "openclaw/openclaw",
+            pullRequest: Number(process.env.TARGET_PR),
+            productH: process.env.PRODUCT_H,
+            evidenceE: process.env.EVIDENCE_SHA,
+            evidenceParent: process.env.PRODUCT_H,
+            liveHeadAtStart: process.env.LIVE_HEAD_AT_START,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            workflow: process.env.GITHUB_WORKFLOW,
+            workflowRef: process.env.GITHUB_WORKFLOW_REF,
+            sourceTrustRoute: "untrusted-secretless-fork-push",
+            evidencePathAllowlist: [process.env.WORKFLOW_PATH, process.env.SCENARIO_PATH].sort(),
+            generatedAt: generatedAt.toISOString(),
+            artifactRetentionDays: 14,
+            expectedExpiry: expiresAt.toISOString(),
+          };
+          fs.writeFileSync(
+            path.join(evidenceDir, "identity-manifest.json"),
+            `${JSON.stringify(manifest, null, 2)}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+
+      - name: Recheck live PR head before packaging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          live_head="$(gh api "repos/openclaw/openclaw/pulls/$TARGET_PR" --jq '.head.sha')"
+          if [[ "$live_head" != "$PRODUCT_H" ]]; then
+            echo "Live PR head moved during proof: expected $PRODUCT_H, got $live_head" >&2
+            exit 1
+          fi
+          LIVE_HEAD_AT_PACKAGE="$live_head" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          const manifestPath = path.join(process.env.EVIDENCE_DIR, "identity-manifest.json");
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          manifest.liveHeadAtPackage = process.env.LIVE_HEAD_AT_PACKAGE;
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+          NODE
+
+      - name: Scan evidence for credentials and sensitive strings
+        id: redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          truffle_json="$(mktemp)"
+          truffle_stderr="$(mktemp)"
+          set +e
+          truffle_version="$(trufflehog --no-update --version | tr -d '\r\n')"
+          trufflehog filesystem "$EVIDENCE_DIR" \
+            --results=verified,unknown \
+            --fail \
+            --fail-on-scan-errors \
+            --json \
+            --no-update \
+            > "$truffle_json" 2> "$truffle_stderr"
+          truffle_exit="$?"
+          set -e
+          truffle_findings="$(wc -l < "$truffle_json" | tr -d ' ')"
+          rm -f "$truffle_json" "$truffle_stderr"
+
+          TRUFFLE_EXIT="$truffle_exit" TRUFFLE_FINDINGS="$truffle_findings" \
+          TRUFFLE_VERSION="$truffle_version" \
+            node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const root = process.env.EVIDENCE_DIR;
+          const patterns = [
+            ["github-token", /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g],
+            ["openai-key", /\bsk-[A-Za-z0-9_-]{20,}\b/g],
+            ["bearer-header", /authorization\s*:\s*bearer\s+\S+/gi],
+            ["private-key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g],
+          ];
+          const findings = [];
+          const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walk(full);
+                continue;
+              }
+              if (!entry.isFile() || entry.name === "redaction-report.json") continue;
+              const buffer = fs.readFileSync(full);
+              if (buffer.includes(0)) continue;
+              const text = buffer.toString("utf8");
+              for (const [label, pattern] of patterns) {
+                pattern.lastIndex = 0;
+                if (pattern.test(text)) {
+                  findings.push({ path: path.relative(root, full), pattern: label });
+                }
+              }
+            }
+          };
+          walk(root);
+          const truffleExit = Number(process.env.TRUFFLE_EXIT);
+          const report = {
+            status:
+              findings.length === 0 && truffleExit === 0
+                ? "PASS"
+                : truffleExit === 183 || findings.length > 0
+                  ? "FAIL"
+                  : "SCANNER_ERROR",
+            customPatternFindings: findings,
+            truffleHog: {
+              version: process.env.TRUFFLE_VERSION,
+              results: ["verified", "unknown"],
+              exitCode: truffleExit,
+              reportedFindings: Number(process.env.TRUFFLE_FINDINGS),
+              rawFindingsRetained: false,
+            },
+          };
+          fs.writeFileSync(
+            path.join(root, "redaction-report.json"),
+            `${JSON.stringify(report, null, 2)}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+
+      - name: Inventory and checksum evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          const root = process.env.EVIDENCE_DIR;
+          const files = [];
+          const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (entry.isFile() && entry.name !== "artifact-inventory.json") {
+                files.push({ path: path.relative(root, full), bytes: fs.statSync(full).size });
+              }
+            }
+          };
+          walk(root);
+          files.sort((left, right) => left.path.localeCompare(right.path));
+          fs.writeFileSync(
+            path.join(root, "artifact-inventory.json"),
+            `${JSON.stringify({ schemaVersion: 1, files }, null, 2)}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+          (
+            cd "$EVIDENCE_DIR"
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+
+      - name: Fail closed before publishing authoritative evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          live_head="$(gh api "repos/openclaw/openclaw/pulls/$TARGET_PR" --jq '.head.sha')"
+          if [[ "$live_head" != "$PRODUCT_H" ]]; then
+            echo "Live PR head moved before artifact publication: expected $PRODUCT_H, got $live_head" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          const root = process.env.EVIDENCE_DIR;
+          const verdict = JSON.parse(fs.readFileSync(path.join(root, "verdict.json"), "utf8"));
+          const redaction = JSON.parse(
+            fs.readFileSync(path.join(root, "redaction-report.json"), "utf8"),
+          );
+          if (verdict.verdict !== "PASS") {
+            throw new Error(`behavior verdict failed: ${JSON.stringify(verdict.acceptance)}`);
+          }
+          if (redaction.status !== "PASS") {
+            throw new Error(`redaction gate failed: ${JSON.stringify(redaction)}`);
+          }
+          NODE
+          (
+            cd "$EVIDENCE_DIR"
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Upload authoritative evidence artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-130871-heartbeat-target-awareness-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
+      - name: Record artifact identity
+        if: always() && steps.upload.outputs.artifact-url != ''
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          EVIDENCE_SHA: ${{ steps.identity.outputs.evidence_sha }}
+        shell: bash
+        run: |
+          {
+            echo "## PR 130871 exact-head proof"
+            echo
+            echo "- Product H: \`$PRODUCT_H\`"
+            echo "- Evidence E: \`$EVIDENCE_SHA\`"
+            echo "- Run/attempt: \`$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT\`"
+            echo "- Artifact id: \`$ARTIFACT_ID\`"
+            echo "- Artifact digest: \`$ARTIFACT_DIGEST\`"
+            echo "- Artifact: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
