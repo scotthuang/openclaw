@@ -1,0 +1,319 @@
+{
+  "schema": "openclaw-browser-passive-focus-proof-v1",
+  "productHead": "969162dfdf4601b25429c56b7759d5b0b65227b2",
+  "evidenceHead": "7d43b9b307c6905c8f4492feee44913e64dd6377",
+  "gateway": "real isolated Gateway",
+  "servedScripts": [
+    "/assets/index-CMiaV4Iz.js"
+  ],
+  "servedBuildId": "2026.9.2-7d43b9b307c6-2026-09-07T07-46-01.023Z-71b2645fc29849d3cc27b9ef88a1c066f48136ed05c7478b4dc737076b890f9a",
+  "browser": {
+    "driver": "openclaw",
+    "attachOnly": true,
+    "headed": true,
+    "processAlive": true,
+    "pid": 80599
+  },
+  "stages": {
+    "baseline": {
+      "activeTabTitle": "Sentinel active tab",
+      "tabStrip": {
+        "sentinel": {
+          "active": true,
+          "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+          "index": 0,
+          "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+          "title": "Sentinel active tab",
+          "windowId": 1259178460
+        },
+        "target": {
+          "active": false,
+          "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+          "index": 1,
+          "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+          "title": "Passive focus target",
+          "windowId": 1259178460
+        }
+      },
+      "renderers": {
+        "sentinel": {
+          "changes": 0,
+          "state": "visible",
+          "title": "Sentinel active tab"
+        },
+        "target": {
+          "changes": 0,
+          "state": "visible",
+          "title": "Passive focus target"
+        }
+      }
+    },
+    "directScreenshot": {
+      "focusPreserved": true,
+      "observation": {
+        "activeTabTitle": "Sentinel active tab",
+        "tabStrip": {
+          "sentinel": {
+            "active": true,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 0,
+            "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+            "title": "Sentinel active tab",
+            "windowId": 1259178460
+          },
+          "target": {
+            "active": false,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 1,
+            "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+            "title": "Passive focus target",
+            "windowId": 1259178460
+          }
+        },
+        "renderers": {
+          "sentinel": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Sentinel active tab"
+          },
+          "target": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Passive focus target"
+          }
+        }
+      }
+    },
+    "directEvaluate": {
+      "focusPreserved": true,
+      "observation": {
+        "activeTabTitle": "Sentinel active tab",
+        "tabStrip": {
+          "sentinel": {
+            "active": true,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 0,
+            "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+            "title": "Sentinel active tab",
+            "windowId": 1259178460
+          },
+          "target": {
+            "active": false,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 1,
+            "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+            "title": "Passive focus target",
+            "windowId": 1259178460
+          }
+        },
+        "renderers": {
+          "sentinel": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Sentinel active tab"
+          },
+          "target": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Passive focus target"
+          }
+        }
+      },
+      "returnedCanary": true
+    },
+    "cardThumbnail": {
+      "focusPreserved": true,
+      "observation": {
+        "activeTabTitle": "Sentinel active tab",
+        "tabStrip": {
+          "sentinel": {
+            "active": true,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 0,
+            "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+            "title": "Sentinel active tab",
+            "windowId": 1259178460
+          },
+          "target": {
+            "active": false,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 1,
+            "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+            "title": "Passive focus target",
+            "windowId": 1259178460
+          }
+        },
+        "renderers": {
+          "sentinel": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Sentinel active tab"
+          },
+          "target": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Passive focus target"
+          }
+        }
+      }
+    },
+    "passivePanelFollow": {
+      "focusPreserved": true,
+      "observation": {
+        "activeTabTitle": "Sentinel active tab",
+        "tabStrip": {
+          "sentinel": {
+            "active": true,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 0,
+            "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+            "title": "Sentinel active tab",
+            "windowId": 1259178460
+          },
+          "target": {
+            "active": false,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 1,
+            "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+            "title": "Passive focus target",
+            "windowId": 1259178460
+          }
+        },
+        "renderers": {
+          "sentinel": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Sentinel active tab"
+          },
+          "target": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Passive focus target"
+          }
+        }
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/tabs",
+          "profile": "user",
+          "targetMatches": false
+        },
+        {
+          "method": "POST",
+          "path": "/screenshot",
+          "profile": "user",
+          "targetMatches": true
+        },
+        {
+          "method": "POST",
+          "path": "/act",
+          "kind": "evaluate",
+          "profile": "user",
+          "targetMatches": true
+        }
+      ]
+    },
+    "explicitCardOpen": {
+      "focusedTarget": true,
+      "observation": {
+        "activeTabTitle": "Passive focus target",
+        "tabStrip": {
+          "sentinel": {
+            "active": false,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 0,
+            "targetId": "2C73EA1A8D85CDE9CFEAC6F600DEF057",
+            "title": "Sentinel active tab",
+            "windowId": 1259178460
+          },
+          "target": {
+            "active": true,
+            "browserContextId": "AC6EB97610DECEBB8035B9DDF9A12697",
+            "index": 1,
+            "targetId": "811831BA23FFEFFE2745F08C98586F3E",
+            "title": "Passive focus target",
+            "windowId": 1259178460
+          }
+        },
+        "renderers": {
+          "sentinel": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Sentinel active tab"
+          },
+          "target": {
+            "changes": 0,
+            "state": "visible",
+            "title": "Passive focus target"
+          }
+        }
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/tabs",
+          "profile": "user",
+          "targetMatches": false
+        },
+        {
+          "method": "POST",
+          "path": "/tabs/focus",
+          "profile": "user",
+          "targetMatches": true
+        },
+        {
+          "method": "POST",
+          "path": "/screenshot",
+          "profile": "user",
+          "targetMatches": true
+        }
+      ]
+    }
+  },
+  "allUiBrowserRequests": [
+    {
+      "method": "POST",
+      "path": "/screenshot",
+      "profile": "user",
+      "targetMatches": true
+    },
+    {
+      "method": "GET",
+      "path": "/tabs",
+      "profile": "user",
+      "targetMatches": false
+    },
+    {
+      "method": "POST",
+      "path": "/screenshot",
+      "profile": "user",
+      "targetMatches": true
+    },
+    {
+      "method": "POST",
+      "path": "/act",
+      "kind": "evaluate",
+      "profile": "user",
+      "targetMatches": true
+    },
+    {
+      "method": "GET",
+      "path": "/tabs",
+      "profile": "user",
+      "targetMatches": false
+    },
+    {
+      "method": "POST",
+      "path": "/tabs/focus",
+      "profile": "user",
+      "targetMatches": true
+    },
+    {
+      "method": "POST",
+      "path": "/screenshot",
+      "profile": "user",
+      "targetMatches": true
+    }
+  ]
+}
