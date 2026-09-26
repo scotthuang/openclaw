@@ -1,0 +1,132 @@
+name: PR 158044 worker candidate validation
+
+on:
+  push:
+    branches: [proof/pr158044-compaction-workers]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PRODUCT_HEAD: 24a953a1d744b58881b0f91b6b07794aea57b20a
+
+jobs:
+  proof:
+    if: github.repository == 'scotthuang/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [behavior, checks, regression]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind validation to the candidate and unchanged PR base
+        env:
+          EVIDENCE_HEAD: ${{ github.sha }}
+          PROOF_LANE: ${{ matrix.lane }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          h, e = os.environ['PRODUCT_HEAD'], os.environ['EVIDENCE_HEAD']
+          git = lambda *a: subprocess.check_output(['git', *a], text=True).strip()
+          assert git('rev-parse', 'HEAD') == e
+          assert git('rev-list', '--parents', '-n', '1', e).split() == [e, h]
+          assert git('merge-base', h, e) == h
+          allowed = {'.github/workflows/pr158044-proof.yml', 'src/gateway/server.sessions.compaction-transport-proof.test.ts'}
+          assert set(git('diff', '--name-only', h, e).splitlines()) == allowed
+          # Deliberate publication freshness gate: moved product heads require new proof.
+          with urllib.request.urlopen('https://api.github.com/repos/openclaw/openclaw/pulls/158044') as response:
+              assert json.load(response)['head']['sha'] == '51b023f174369b5ee953ad59e20dd65dfe736649'
+          root = pathlib.Path('proof-output'); root.mkdir()
+          manifest = dict(repository=os.environ['GITHUB_REPOSITORY'], pr=158044, productHead=h, evidenceHead=e, runId=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], lane=os.environ['PROOF_LANE'], sourceTrust='secretless GitHub-hosted fork runner; no persisted checkout credentials', bindings='candidate sole parent, merge-base, evidence-only allowlist, unchanged live PR base verified', retentionDays=30)
+          (root/'identity.json').write_text(json.dumps(manifest, indent=2)+'\n')
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+      - name: Install the repository-pinned package manager and dependencies
+        run: |
+          npm install --global pnpm@12.4.2
+          pnpm --filter '!@openclaw/onnx' install --frozen-lockfile
+      - name: Run behavior and worker regression coverage
+        if: matrix.lane == 'behavior'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          OPENCLAW_PR158044_PROOF_DIR: ${{ github.workspace }}/proof-output
+        run: |
+          set -o pipefail
+          /usr/bin/time -v node scripts/run-vitest.mjs src/agents/sessions/agent-session-compaction.test.ts src/agents/sessions/session-manager.test.ts src/agents/sessions/session-manager-hydration.test.ts src/agents/session-tool-result-guard.transcript-events.test.ts src/agents/sessions/session-compaction-persistence.test.ts src/agents/embedded-agent-runner/transcript-byte-preflight-authority.test.ts src/agents/embedded-agent-runner/compact.delegate.test.ts src/agents/embedded-agent-runner/compact.queued-successor.test.ts src/agents/embedded-agent-runner/compact.foreground-resources.test.ts src/gateway/server.sessions.compaction-accounting.test.ts src/gateway/server.sessions.compaction-transport-proof.test.ts --maxWorkers=1 2>&1 | tee proof-output/test.log
+      - name: Typecheck, lint, and build
+        if: matrix.lane == 'checks'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          pnpm tsgo:core 2>&1 | tee proof-output/typecheck.log
+          node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.agents-sessions.json 2>&1 | tee proof-output/test-types.log
+          node scripts/check-changed.mjs --dry-run -- $(git diff --name-only 51b023f174369b5ee953ad59e20dd65dfe736649 "$PRODUCT_HEAD") > proof-output/check-plan.log
+          git diff --name-only 51b023f174369b5ee953ad59e20dd65dfe736649 "$PRODUCT_HEAD" -- '*.ts' > proof-output/changed-typescript.txt
+          xargs pnpm exec oxlint --type-aware --deny-warnings < proof-output/changed-typescript.txt 2>&1 | tee proof-output/lint.log
+          pnpm build 2>&1 | tee proof-output/build.log
+      - name: Confirm original defect with the same AgentSession entry point
+        if: matrix.lane == 'regression'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          cp src/agents/sessions/agent-session-compaction.test.ts proof-output/regression.test.ts
+          git diff --name-only -z 51b023f174369b5ee953ad59e20dd65dfe736649 "$PRODUCT_HEAD" -- src | xargs -0 git restore --source=51b023f174369b5ee953ad59e20dd65dfe736649 --
+          cp proof-output/regression.test.ts src/agents/sessions/agent-session-compaction.test.ts
+          set +e
+          node scripts/run-vitest.mjs src/agents/sessions/agent-session-compaction.test.ts --maxWorkers=1 --reporter=json --outputFile=proof-output/regression-results.json -t 'reports replacement tokens and the exact equal-summary entry' 2>&1 | tee proof-output/regression.log
+          outcome=${PIPESTATUS[0]}
+          set -e
+          test "$outcome" -ne 0
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json
+          report=json.loads(Path('proof-output/regression-results.json').read_text())
+          cases=[case for suite in report['testResults'] for case in suite['assertionResults'] if 'reports replacement tokens and the exact equal-summary entry' in case['fullName']]
+          assert len(cases)==2, cases
+          memory=next(case for case in cases if case['fullName'].endswith('(memory)'))
+          durable=next(case for case in cases if case['fullName'].endswith('(sqlite)'))
+          assert memory['status']=='passed', memory
+          assert durable['status']=='failed', durable
+          failure='\n'.join(durable['failureMessages'])
+          source=Path('src/agents/sessions/agent-session-compaction.test.ts').read_text().splitlines()
+          assertion_line=next(index+1 for index,line in enumerate(source) if 'expect(hostExec?.mock.calls' in line)
+          assert 'BEGIN' in failure and f'agent-session-compaction.test.ts:{assertion_line}:' in failure, failure
+          Path('proof-output/regression-verdict.txt').write_text('Original head fails the durable AgentSession no-host-transaction assertion; in-memory control passes.\n')
+          PYCODE
+      - name: Audit artifact and record file digests
+        id: audit
+        if: always()
+        env:
+          PROOF_LANE: ${{ matrix.lane }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          root = pathlib.Path('proof-output')
+          assert (root/'identity.json').is_file()
+          inventory = []
+          for p in sorted(root.iterdir()):
+              data = p.read_bytes()
+              text = data.decode('utf-8')
+              patterns = [r'gh[pousr]_[A-Za-z0-9]{20,}', r'github_pat_[A-Za-z0-9_]{20,}', r'sk-[A-Za-z0-9_-]{20,}', r'-----BEGIN [A-Z ]*PRIVATE KEY-----', r'/Users/[^/\s]+']
+              assert not any(re.search(pattern, text) for pattern in patterns), 'Artifact redaction scan refused a file'
+              inventory.append(dict(file=p.name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
+          (root/'inventory.json').write_text(json.dumps(dict(redaction='pass; isolated synthetic state; no credentials injected', files=inventory), indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.audit.outcome == 'success'
+        with:
+          name: pr158044-${{ matrix.lane }}-${{ github.sha }}
+          path: proof-output
+          retention-days: 30
+          if-no-files-found: error
