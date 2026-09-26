@@ -1,0 +1,90 @@
+name: PR 158044 exact-head proof
+
+on:
+  push:
+    branches: [proof/pr158044-compaction-transport]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PRODUCT_HEAD: 51b023f174369b5ee953ad59e20dd65dfe736649
+
+jobs:
+  proof:
+    if: github.repository == 'scotthuang/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [transport]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind evidence to the unchanged product head
+        env:
+          EVIDENCE_HEAD: ${{ github.sha }}
+          PROOF_LANE: ${{ matrix.lane }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          h, e = os.environ['PRODUCT_HEAD'], os.environ['EVIDENCE_HEAD']
+          git = lambda *a: subprocess.check_output(['git', *a], text=True).strip()
+          assert git('rev-parse', 'HEAD') == e
+          assert git('rev-list', '--parents', '-n', '1', e).split() == [e, h]
+          assert git('merge-base', h, e) == h
+          allowed = {'.github/workflows/pr158044-proof.yml', 'src/gateway/server.sessions.compaction-transport-proof.test.ts'}
+          assert set(git('diff', '--name-only', h, e).splitlines()) == allowed
+          # Deliberate publication freshness gate: moved product heads require new proof.
+          with urllib.request.urlopen('https://api.github.com/repos/openclaw/openclaw/pulls/158044') as response:
+              assert json.load(response)['head']['sha'] == h
+          root = pathlib.Path('proof-output'); root.mkdir()
+          manifest = dict(repository=os.environ['GITHUB_REPOSITORY'], pr=158044, productHead=h, evidenceHead=e, runId=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], lane=os.environ['PROOF_LANE'], sourceTrust='secretless GitHub-hosted fork runner; no persisted checkout credentials', bindings='sole parent, merge-base, evidence-only allowlist, live PR head verified', retentionDays=30)
+          (root/'identity.json').write_text(json.dumps(manifest, indent=2)+'\n')
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+      - name: Install the repository-pinned package manager and dependencies
+        run: |
+          npm install --global pnpm@12.4.2
+          pnpm --filter '!@openclaw/onnx' install --frozen-lockfile
+      - name: Run real WebSocket proof
+        if: matrix.lane == 'transport'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          OPENCLAW_PR158044_PROOF_DIR: ${{ github.workspace }}/proof-output
+        run: |
+          set -o pipefail
+          node scripts/run-vitest.mjs src/gateway/server.sessions.compaction-transport-proof.test.ts --maxWorkers=1 2>&1 | tee proof-output/test.log
+      - name: Audit artifact and record file digests
+        id: audit
+        if: always()
+        env:
+          PROOF_LANE: ${{ matrix.lane }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          root = pathlib.Path('proof-output')
+          assert (root/'identity.json').is_file()
+          inventory = []
+          for p in sorted(root.iterdir()):
+              data = p.read_bytes()
+              text = data.decode('utf-8')
+              patterns = [r'gh[pousr]_[A-Za-z0-9]{20,}', r'github_pat_[A-Za-z0-9_]{20,}', r'sk-[A-Za-z0-9_-]{20,}', r'-----BEGIN [A-Z ]*PRIVATE KEY-----', r'/Users/[^/\s]+']
+              assert not any(re.search(pattern, text) for pattern in patterns), 'Artifact redaction scan refused a file'
+              inventory.append(dict(file=p.name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
+          (root/'inventory.json').write_text(json.dumps(dict(redaction='pass; isolated synthetic state; no credentials injected', files=inventory), indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.audit.outcome == 'success'
+        with:
+          name: pr158044-${{ matrix.lane }}-${{ github.sha }}
+          path: proof-output
+          retention-days: 30
+          if-no-files-found: error
