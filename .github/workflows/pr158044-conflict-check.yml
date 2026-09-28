@@ -1,0 +1,145 @@
+name: PR 158044 conflict integration checks
+
+on:
+  push:
+    branches: [proof/pr158044-conflicts-20260929-r2]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PRODUCT_HEAD: f9f21301aca7a1306c885d57b2e33e18d6c661e8
+  INTEGRATED_BASE: 9b730f0cfb47281b51a01bdd3415e7c645e61b3a
+
+jobs:
+  check:
+    if: github.repository == 'scotthuang/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [behavior, types-static, runtime-build]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Bind checks to the reviewed merge and unchanged PR
+        env:
+          EVIDENCE_HEAD: ${{ github.sha }}
+          CHECK_LANE: ${{ matrix.lane }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          h, e, base = (os.environ[k] for k in ['PRODUCT_HEAD', 'EVIDENCE_HEAD', 'INTEGRATED_BASE'])
+          git = lambda *a: subprocess.check_output(['git', *a], text=True).strip()
+          assert git('rev-parse', 'HEAD') == e
+          assert git('rev-list', '--parents', '-n', '1', e).split() == [e, h]
+          assert git('merge-base', h, e) == h
+          assert git('rev-parse', h+'^') == '042c15cdbea10d49accecce6b3465e582c5f8f04'
+          assert git('rev-list', '--parents', '-n', '1', h+'^').split() == ['042c15cdbea10d49accecce6b3465e582c5f8f04', '7578450cf738045bef02fde07a73a3eec364d989', base]
+          assert git('diff', '--name-only', h, e) == '.github/workflows/pr158044-conflict-check.yml'
+          with urllib.request.urlopen('https://api.github.com/repos/openclaw/openclaw/pulls/158044') as response:
+              assert json.load(response)['head']['sha'] == '7578450cf738045bef02fde07a73a3eec364d989'
+          root = pathlib.Path('proof-output'); root.mkdir()
+          identity = dict(repository=os.environ['GITHUB_REPOSITORY'], pr=158044, productHead=h, integratedBase=base, evidenceHead=e, runId=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], lane=os.environ['CHECK_LANE'], sourceTrust='secretless fork runner; no persisted checkout credentials', retentionDays=30)
+          (root/'identity.json').write_text(json.dumps(identity, indent=2)+'\n')
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+      - name: Install pinned tooling and dependencies
+        run: |
+          npm install --global pnpm@12.5.1
+          pnpm --filter '!@openclaw/onnx' install --frozen-lockfile
+      - name: Prove the aliased-store regression without the integration fix
+        if: matrix.lane == 'behavior'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          path = pathlib.Path('src/agents/sessions/session-manager-metadata.worker.ts')
+          original = path.read_text()
+          start = original.index('            const accountingOptions = toDatabaseOptions(')
+          end = original.index('            const committed = persistCompactionBoundaryWithSessionEntrySync(', start)
+          try:
+              path.write_text(original[:start] + original[end:])
+              command = ['node', 'scripts/run-vitest.mjs', 'src/agents/embedded-agent-runner/compact.delegate.test.ts', '--maxWorkers=1', '-t', 'pinned, (alias|direct) store', '--reporter=json', '--outputFile=proof-output/alias-before.json']
+              with open('proof-output/alias-before.log', 'w') as log:
+                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+              data = json.loads(pathlib.Path('proof-output/alias-before.json').read_text())
+              cases = [a for suite in data['testResults'] for a in suite['assertionResults'] if a['status'] not in ('pending', 'skipped')]
+              alias = [a for a in cases if 'alias store' in a['fullName']]
+              direct = [a for a in cases if 'direct store' in a['fullName']]
+              assert result.returncode != 0 and len(alias) == 1 and alias[0]['status'] == 'failed', cases
+              assert len(direct) == 2 and all(a['status'] == 'passed' for a in direct), cases
+              assert 'session writer claim changed before transcript persistence' in '\n'.join(alias[0]['failureMessages']), alias
+              pathlib.Path('proof-output/alias-regression-verdict.json').write_text(json.dumps(dict(status='pass', aliasFailed=True, directControlsPassed=2, defect='un-normalized accounting path rejects the canonical worker database'))+'\n')
+          finally:
+              path.write_text(original)
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          PY
+      - name: Run focused compaction and upstream integration tests
+        if: matrix.lane == 'behavior'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          /usr/bin/time -v node scripts/run-vitest.mjs src/agents/embedded-agent-runner/compact.delegate.test.ts src/agents/embedded-agent-runner/compact.delegate-resources.test.ts src/agents/sessions/agent-session-compaction.test.ts src/agents/sessions/session-manager.test.ts src/agents/sessions/session-manager-hydration.test.ts src/agents/sessions/session-manager-transaction-rollback.test.ts src/agents/sessions/session-manager-target-capture.test.ts src/agents/sessions/session-manager-static-notes.test.ts src/agents/sessions/session-compaction-persistence.test.ts src/agents/session-tool-result-guard.transcript-events.test.ts src/config/sessions/session-accessor.compaction-boundary.test.ts src/config/sessions/session-transcript-worker-lanes.test.ts src/gateway/server.sessions.compaction.test.ts src/gateway/server.sessions.compaction-accounting.test.ts --maxWorkers=1 2>&1 | tee proof-output/tests.log
+      - name: Run core types and focused test types
+        if: matrix.lane == 'types-static'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          pnpm tsgo:core 2>&1 | tee proof-output/types.log
+          node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.agents-sessions.json 2>&1 | tee proof-output/test-types.log
+      - name: Check changed source, formatting, and docs
+        if: matrix.lane == 'types-static'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          git diff --name-only "$INTEGRATED_BASE" "$PRODUCT_HEAD" > proof-output/changed-files.txt
+          git diff --name-only "$INTEGRATED_BASE" "$PRODUCT_HEAD" -- '*.ts' > proof-output/changed-typescript.txt
+          xargs node scripts/check-changed.mjs --dry-run --base "$INTEGRATED_BASE" --head "$PRODUCT_HEAD" -- < proof-output/changed-files.txt > proof-output/check-plan.log 2>&1
+          xargs pnpm exec oxfmt --check < proof-output/changed-files.txt 2>&1 | tee proof-output/format.log
+          xargs node scripts/run-oxlint.mjs --type-aware --deny-warnings --tsconfig config/tsconfig/oxlint.core.json < proof-output/changed-typescript.txt 2>&1 | tee proof-output/lint.log
+          pnpm check:line-cap-ratchet --base "$INTEGRATED_BASE" 2>&1 | tee proof-output/line-cap.log
+          pnpm check:max-lines-ratchet --base "$INTEGRATED_BASE" 2>&1 | tee proof-output/max-lines.log
+          pnpm check:assertion-safety --base "$INTEGRATED_BASE" 2>&1 | tee proof-output/assertions.log
+          node scripts/check-docs-mdx.mjs docs/plugins/codex-harness-runtime/compaction.md docs/plugins/sdk-runtime/state-and-system.md docs/reference/database-schemas/worker-access.md 2>&1 | tee proof-output/docs.log
+      - name: Build runtime and worker artifacts
+        if: matrix.lane == 'runtime-build'
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -o pipefail
+          pnpm build:ci-artifacts 2>&1 | tee proof-output/build.log
+      - name: Audit logs and record digests
+        id: audit
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          root = pathlib.Path('proof-output')
+          assert (root/'identity.json').is_file()
+          inventory = []
+          for path in sorted(root.iterdir()):
+              data = path.read_bytes(); text = data.decode('utf-8')
+              patterns = [r'gh[pousr]_[A-Za-z0-9]{20,}', r'github_pat_[A-Za-z0-9_]{20,}', r'sk-[A-Za-z0-9_-]{20,}', r'-----BEGIN [A-Z ]*PRIVATE KEY-----', r'/Users/[^/\s]+']
+              assert not any(re.search(pattern, text) for pattern in patterns), 'Artifact redaction scan refused a file'
+              inventory.append(dict(file=path.name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
+          (root/'inventory.json').write_text(json.dumps(dict(redaction='pass', files=inventory), indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.audit.outcome == 'success'
+        with:
+          name: pr158044-conflicts-${{ matrix.lane }}-${{ github.sha }}
+          path: proof-output
+          retention-days: 30
+          if-no-files-found: error
