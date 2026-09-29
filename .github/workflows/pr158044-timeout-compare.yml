@@ -1,0 +1,113 @@
+name: PR 158044 timeout baseline comparison
+
+on:
+  push:
+    branches: [proof/pr158044-timeouts-20260929]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'scotthuang/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [base, merge]
+        lane: [large, small]
+    env:
+      PRODUCT_HEAD: f9f21301aca7a1306c885d57b2e33e18d6c661e8
+      BASE_HEAD: aa8f6c79450d5413e5b53b3051a5435d9e4f8b2a
+      MERGE_HEAD: cb836a472edf28dd04fcef0c370f5910a0a9d4ab
+      REVISION: ${{ matrix.revision }}
+      LANE: ${{ matrix.lane }}
+      OPENCLAW_VITEST_MAX_WORKERS: "2"
+      OPENCLAW_NODE_TEST_PLAN_CONCURRENCY: "1"
+      OPENCLAW_NODE_TEST_PLAN_CONTINUE_ON_FAILURE: "1"
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 4
+          persist-credentials: false
+      - name: Bind the two revisions and original failing shard selections
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, urllib.request
+          git = lambda *args: subprocess.check_output(['git', *args], text=True).strip()
+          h, b, m, e = (os.environ[k] for k in ['PRODUCT_HEAD', 'BASE_HEAD', 'MERGE_HEAD', 'GITHUB_SHA'])
+          assert git('rev-list', '--parents', '-n', '1', e).split() == [e, h]
+          allowed = {'.github/workflows/pr158044-timeout-compare.yml', '.github/diagnostics/pr158044-timeouts/large.json', '.github/diagnostics/pr158044-timeouts/small.json'}
+          assert set(git('diff', '--name-only', h, e).splitlines()) == allowed
+          with urllib.request.urlopen('https://api.github.com/repos/openclaw/openclaw/pulls/158044') as response:
+              assert json.load(response)['head']['sha'] == h
+          subprocess.run(['git','fetch','--no-tags','--depth=2','https://github.com/openclaw/openclaw.git',m],check=True)
+          assert git('rev-list', '--parents', '-n', '1', m).split() == [m, b, h]
+          target = {'base': b, 'merge': m}[os.environ['REVISION']]
+          lane = os.environ['LANE']
+          plan = pathlib.Path('.github/diagnostics/pr158044-timeouts', lane+'.json').read_bytes()
+          groups = json.loads(plan)
+          assert [len(group['includePatterns']) for group in groups] == {'large': [31, 40], 'small': [55]}[lane]
+          output = pathlib.Path(os.environ['RUNNER_TEMP'])/'comparison-output'
+          output.mkdir()
+          (output/'groups.json').write_bytes(plan)
+          identity = dict(productHead=h, baseHead=b, mergeHead=m, evidenceHead=e, testedHead=target, revision=os.environ['REVISION'], lane=lane, runId=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], originalRun=36453346384, originalJob={'large':109034496473,'small':109034496759}[lane], selectionSha256=hashlib.sha256(plan).hexdigest(), scope='Original ordered group prefix through the failing group; later independent groups omitted', environment='Fresh GitHub-hosted Ubuntu; no upstream warmed caches or credentials; two Vitest workers')
+          (output/'identity.json').write_text(json.dumps(identity, indent=2)+'\n')
+          subprocess.run(['git','checkout','--detach',target],check=True)
+          assert git('rev-parse','HEAD') == target
+          for group in groups:
+              assert all(pathlib.Path(p).is_file() for p in group['includePatterns'])
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.19.0"
+          package-manager-cache: false
+      - name: Install the shared pinned dependencies
+        timeout-minutes: 10
+        run: |
+          npm install --global pnpm@12.5.1
+          pnpm --filter '!@openclaw/onnx' install --frozen-lockfile
+      - name: Replay the original group prefix once
+        timeout-minutes: 27
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, sys, time
+          output = pathlib.Path(os.environ['RUNNER_TEMP'])/'comparison-output'
+          env = dict(os.environ)
+          env['OPENCLAW_NODE_TEST_GROUPS_JSON'] = (output/'groups.json').read_text()
+          env['OPENCLAW_VITEST_SHARD_NAME'] = 'changed-compact-'+{'large':'large-40','small':'small-4'}[os.environ['LANE']]
+          command = ['timeout','--signal=TERM','--kill-after=60s','1500s','node','--import','tsx','scripts/ci-run-node-test-shard.mts']
+          started = time.monotonic()
+          with (output/'tests.log').open('w') as log:
+              result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+          summary = dict(exitCode=result.returncode, wallSeconds=time.monotonic()-started, processDeadlineSeconds=1500, command=command)
+          (output/'result.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps(summary))
+          sys.exit(result.returncode)
+          PY
+      - name: Audit and inventory diagnostic output
+        if: always()
+        id: audit
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          output = pathlib.Path(os.environ['RUNNER_TEMP'])/'comparison-output'
+          assert (output/'identity.json').is_file()
+          inventory = []
+          for path in sorted(output.iterdir()):
+              data = path.read_bytes()
+              text = data.decode('utf-8')
+              patterns = [r'gh[pousr]_[A-Za-z0-9]{20,}', r'github_pat_[A-Za-z0-9_]{20,}', r'sk-[A-Za-z0-9_-]{20,}', r'-----BEGIN [A-Z ]*PRIVATE KEY-----', r'/Users/[^/\s]+']
+              assert not any(re.search(pattern,text) for pattern in patterns), 'Diagnostic output failed redaction audit'
+              inventory.append(dict(file=path.name,bytes=len(data),sha256=hashlib.sha256(data).hexdigest()))
+          (output/'inventory.json').write_text(json.dumps(inventory,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.audit.outcome == 'success'
+        with:
+          name: pr158044-timeouts-${{ matrix.revision }}-${{ matrix.lane }}
+          path: ${{ runner.temp }}/comparison-output
+          retention-days: 14
+          if-no-files-found: error
