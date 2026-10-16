@@ -1,8 +1,10 @@
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { JSX } from "@solidjs/web";
 import {
   createEffect,
   createMemo,
+  createSignal,
   For,
   Match,
   Show,
@@ -121,6 +123,9 @@ export function GroupedMessage(props: GroupedMessageProps) {
             <Show when={props.options.replyLine}>
               <ReplyLineView line={props.options.replyLine!} actions={props.options} inline />
             </Show>
+            <Show when={state().quotePreview}>
+              {(preview) => <MessageQuotePreview preview={preview()} />}
+            </Show>
             <Switch>
               <Match when={state().onlyToolCards}>
                 <InlineToolCards cards={state().toolCards} options={state().toolRenderOptions} />
@@ -173,6 +178,44 @@ export function GroupedMessage(props: GroupedMessageProps) {
         )}
       />
     </Show>
+  );
+}
+
+function MessageQuotePreview(props: {
+  preview: NonNullable<GroupedMessagePresentation["quotePreview"]>;
+}) {
+  const [expanded, setExpanded] = createSignal(false);
+  const excerpt = createMemo(() =>
+    truncateUtf16Safe(props.preview.text.split("\n").slice(0, 3).join("\n"), 240),
+  );
+  const collapsible = () => excerpt() !== props.preview.text;
+  return (
+    <div class="chat-quote-preview">
+      <div class="chat-quote-preview__heading">
+        <Icon name="cornerUpLeft" />
+        <span>{t("chat.messages.quotedMessage.label")}</span>
+        <Show when={props.preview.senderLabel}>
+          <span class="chat-quote-preview__sender">{props.preview.senderLabel}</span>
+        </Show>
+      </div>
+      <blockquote class="chat-quote-preview__text">
+        {expanded() || !collapsible() ? props.preview.text : `${excerpt()}…`}
+      </blockquote>
+      <Show when={collapsible()}>
+        <button
+          class="chat-quote-preview__toggle"
+          type="button"
+          aria-expanded={expanded() ? "true" : "false"}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {t(
+            expanded()
+              ? "chat.messages.quotedMessage.collapse"
+              : "chat.messages.quotedMessage.expand",
+          )}
+        </button>
+      </Show>
+    </div>
   );
 }
 

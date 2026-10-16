@@ -627,96 +627,99 @@ describe("persistUserTurnTranscript", () => {
     ]);
   });
 
-  it("preserves transcript metadata when before_message_write replaces a user turn", async () => {
-    let hookCalls = 0;
-    const provenance = {
-      kind: "inter_session" as const,
-      sourceSessionKey: "source-main",
-      sourceTool: "sessions_send",
-    };
-    initializeGlobalHookRunner(
-      createMockPluginRegistry([
-        {
-          hookName: "before_message_write",
-          handler: (event) => {
-            hookCalls += 1;
-            const message = (event as { message: Record<string, unknown> }).message;
-            const meta = message["__openclaw"] as {
-              transport?: {
-                conversationRef?: string;
-                messageId?: string;
-                clients?: Array<{ displayName?: string }>;
+  it.each(["transcript-reply-1", undefined])(
+    "preserves reply metadata through storage and write hooks (transcript target: %s)",
+    async (replyToId) => {
+      let hookCalls = 0;
+      const provenance = {
+        kind: "inter_session" as const,
+        sourceSessionKey: "source-main",
+        sourceTool: "sessions_send",
+      };
+      initializeGlobalHookRunner(
+        createMockPluginRegistry([
+          {
+            hookName: "before_message_write",
+            handler: (event) => {
+              hookCalls += 1;
+              const message = (event as { message: Record<string, unknown> }).message;
+              const meta = message["__openclaw"] as {
+                transport?: {
+                  conversationRef?: string;
+                  messageId?: string;
+                  clients?: Array<{ displayName?: string }>;
+                };
               };
-            };
-            if (meta.transport) {
-              meta.transport.conversationRef = "conv_tampered";
-              meta.transport.messageId = "tampered-message";
-              const source = meta.transport.clients?.[0];
-              if (source) {
-                source.displayName = "Forged app";
+              if (meta.transport) {
+                meta.transport.conversationRef = "conv_tampered";
+                meta.transport.messageId = "tampered-message";
+                const source = meta.transport.clients?.[0];
+                if (source) {
+                  source.displayName = "Forged app";
+                }
               }
-            }
-            return {
-              message: castAgentMessage({
-                role: "user",
-                content: "[redacted by hook]",
-                __openclaw: { hookOwned: true },
-              }),
-            };
+              return {
+                message: castAgentMessage({
+                  role: "user",
+                  content: "[redacted by hook]",
+                  __openclaw: { hookOwned: true },
+                }),
+              };
+            },
           },
-        },
-      ]),
-    );
-    const dir = sessionDirs.make();
-    const target = createSqliteTranscriptTarget({ dir });
+        ]),
+      );
+      const dir = sessionDirs.make();
+      const target = createSqliteTranscriptTarget({ dir });
 
-    const persist = () =>
-      persistUserTurnTranscript({
-        ...target,
-        input: {
-          text: "secret prompt",
+      const persist = () =>
+        persistUserTurnTranscript({
+          ...target,
+          input: {
+            text: "secret prompt",
+            idempotencyKey: "chat-run-1:user",
+            ...(replyToId ? { replyToId } : {}),
+            replyToPreview: { text: "Original reply", senderLabel: "Molty" },
+            senderIsOwner: true,
+            provenance,
+            sender: { id: "user-42", name: "Ada" },
+            transport: {
+              channel: "reef",
+              conversationRef: "conv_0123456789abcdef0123456789abcdef",
+              messageId: "inbound-1",
+              replyToId: "outbound-1",
+              clients: [{ id: "cli", mode: "cli", displayName: "Original app" }],
+            },
+          },
+          beforeMessageWrite: runAgentHarnessBeforeMessageWriteHook,
+        });
+      await persist();
+      await persist();
+
+      await expect(readTranscriptMessages(target)).resolves.toEqual([
+        expect.objectContaining({
+          role: "user",
+          content: "[redacted by hook]",
           idempotencyKey: "chat-run-1:user",
-          replyToId: "transcript-reply-1",
-          replyToPreview: { text: "Original reply", senderLabel: "Molty" },
-          senderIsOwner: true,
           provenance,
-          sender: { id: "user-42", name: "Ada" },
-          transport: {
-            channel: "reef",
-            conversationRef: "conv_0123456789abcdef0123456789abcdef",
-            messageId: "inbound-1",
-            replyToId: "outbound-1",
-            clients: [{ id: "cli", mode: "cli", displayName: "Original app" }],
+          __openclaw: {
+            hookOwned: true,
+            ...(replyToId ? { replyToId } : {}),
+            replyToPreview: { text: "Original reply", senderLabel: "Molty" },
+            senderIsOwner: false,
+            transport: {
+              channel: "reef",
+              conversationRef: "conv_0123456789abcdef0123456789abcdef",
+              messageId: "inbound-1",
+              replyToId: "outbound-1",
+              clients: [{ id: "cli", mode: "cli", displayName: "Original app" }],
+            },
           },
-        },
-        beforeMessageWrite: runAgentHarnessBeforeMessageWriteHook,
-      });
-    await persist();
-    await persist();
-
-    await expect(readTranscriptMessages(target)).resolves.toEqual([
-      expect.objectContaining({
-        role: "user",
-        content: "[redacted by hook]",
-        idempotencyKey: "chat-run-1:user",
-        provenance,
-        __openclaw: {
-          hookOwned: true,
-          replyToId: "transcript-reply-1",
-          replyToPreview: { text: "Original reply", senderLabel: "Molty" },
-          senderIsOwner: false,
-          transport: {
-            channel: "reef",
-            conversationRef: "conv_0123456789abcdef0123456789abcdef",
-            messageId: "inbound-1",
-            replyToId: "outbound-1",
-            clients: [{ id: "cli", mode: "cli", displayName: "Original app" }],
-          },
-        },
-      }),
-    ]);
-    expect(hookCalls).toBe(1);
-  });
+        }),
+      ]);
+      expect(hookCalls).toBe(1);
+    },
+  );
 
   it.each([true, false])(
     "protects internal Goal metadata across write hooks (Goal: %s)",

@@ -181,11 +181,19 @@ export function prepareGroupedMessage(
 
   // Classify completed bare JSON before Markdown can interpret its literal values.
   const jsonResult = markdown && !opts.isStreaming ? parseMarkdownJson(markdown) : null;
+  // Channel quotes can carry a saved preview without a transcript navigation target.
+  const quotePreview =
+    normalizedRole === "user" &&
+    !normalizedMessage.replyTarget &&
+    normalizedMessage.replyPreview?.text
+      ? normalizedMessage.replyPreview
+      : undefined;
 
   const onlyPreviewChips =
     normalizedRole === "user" &&
     !markdown &&
     !normalizedMessage.replyTarget &&
+    !quotePreview &&
     !hasImagesOrNotices &&
     !hasToolCards &&
     visibleAttachments.length > 0 &&
@@ -221,7 +229,8 @@ export function prepareGroupedMessage(
     !hasToolCards &&
     !hasMediaContent &&
     clawHubCards.length === 0 &&
-    !normalizedMessage.replyTarget;
+    !normalizedMessage.replyTarget &&
+    !quotePreview;
 
   const toolMessageDisclosureId = `toolmsg:${messageKey}`;
   const toolMessageExpanded = opts.isToolMessageExpanded?.(toolMessageDisclosureId) ?? false;
@@ -320,6 +329,7 @@ export function prepareGroupedMessage(
     markdown,
     markdownRenderOptions,
     jsonResult,
+    quotePreview,
     bubbleClasses,
     empty,
     toolMessageDisclosureId,

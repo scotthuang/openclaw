@@ -333,12 +333,22 @@ vi.mock("./groups.js", async (importOriginal) => ({
   buildGroupIntro: vi.fn().mockReturnValue(""),
 }));
 
-vi.mock("./inbound-meta.js", () => ({
-  buildInboundMetaSystemPrompt: vi.fn().mockReturnValue(""),
-  buildInboundUserContextPrefix: vi.fn().mockReturnValue(""),
-  formatActiveGoalContext: vi.fn().mockReturnValue(undefined),
-  resolveInboundUserContextPromptJoiner: vi.fn().mockReturnValue(undefined),
-}));
+vi.mock("./inbound-meta.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./inbound-meta.js")>();
+  const prefix = vi.fn().mockReturnValue("");
+  return {
+    buildInboundMetaSystemPrompt: vi.fn().mockReturnValue(""),
+    buildInboundUserContextPrefix: prefix,
+    buildInboundUserContext: (
+      ...args: Parameters<typeof actual.buildInboundUserContextPrefix>
+    ) => ({
+      ...actual.buildInboundUserContext(...args),
+      text: prefix(...args),
+    }),
+    formatActiveGoalContext: vi.fn().mockReturnValue(undefined),
+    resolveInboundUserContextPromptJoiner: vi.fn().mockReturnValue(undefined),
+  };
+});
 
 vi.mock("./queue/settings-runtime.js", () => ({
   resolveQueueSettings: vi.fn().mockReturnValue({ mode: "steer" }),
@@ -1806,6 +1816,102 @@ describe("runPreparedReply media-only handling", () => {
     );
     expect(call?.followupRun.currentInboundContext?.text).toContain("quoted status body");
   });
+
+  it.each([
+    {
+      name: "a Weixin quote restored by the plugin",
+      channel: "openclaw-weixin",
+      context: {
+        ReplyToId: "weixin-source-42",
+        ReplyToBody: "The background check\0 did not complete.",
+        ReplyToQuoteText: "The background check",
+        ReplyToSender: "Assistant\0",
+      },
+      preview: { text: "The background check did not complete.", senderLabel: "Assistant" },
+    },
+    {
+      name: "a Telegram selected quote",
+      channel: "telegram",
+      context: {
+        ReplyToId: "42",
+        ReplyToBody: "Full original",
+        ReplyToQuoteText: "Selected words",
+      },
+      preview: { text: "Selected words" },
+    },
+    {
+      name: "a plain message",
+      channel: "openclaw-weixin",
+      context: {},
+      preview: undefined,
+    },
+    {
+      name: "an unresolved provider message ID",
+      channel: "openclaw-weixin",
+      context: { ReplyToId: "missing-original" },
+      preview: undefined,
+    },
+    {
+      name: "a reply chain that supersedes the fallback quote",
+      channel: "slack",
+      context: {
+        ReplyToId: "42",
+        ReplyToBody: "Unused fallback",
+        ReplyChain: [{ messageId: "42", body: "Selected chain context" }],
+      },
+      preview: undefined,
+    },
+    {
+      name: "a chat window that supersedes the fallback quote",
+      channel: "slack",
+      context: {
+        ReplyToId: "42",
+        ReplyToBody: "Unused fallback",
+        ChannelStructuredContext: [
+          {
+            label: "Conversation context",
+            type: "chat_window",
+            payload: { messages: [{ message_id: "42", body: "Selected window context" }] },
+          },
+        ],
+      },
+      preview: undefined,
+    },
+  ])(
+    "captures display metadata for $name without changing the user text",
+    async ({ channel, context, preview }) => {
+      const actual = await vi.importActual<typeof import("./inbound-meta.js")>("./inbound-meta.js");
+      vi.mocked(buildInboundUserContextPrefix).mockImplementation(
+        actual.buildInboundUserContextPrefix,
+      );
+      await runPrepared({
+        ...turn("Please explain this", {
+          ...createProviderSurface(channel),
+          OriginatingChannel: channel,
+          OriginatingTo: "synthetic-contact",
+          ChatType: "direct",
+          ...context,
+        }),
+      });
+
+      const call = requireRunReplyAgentCall();
+      const message = expectDefined(
+        call.followupRun.userTurnTranscriptRecorder?.message,
+        "prepared channel user turn",
+      );
+      expect(message.content).toBe("Please explain this");
+      expect(message["__openclaw"]?.replyToPreview).toEqual(preview);
+      expect(message["__openclaw"]).not.toHaveProperty("replyToId");
+      expect(message["__openclaw"]?.transport).toMatchObject({
+        channel,
+        ...("ReplyToId" in context ? { replyToId: context.ReplyToId } : {}),
+      });
+      expect(call.followupRun.transcriptPrompt).toBe("Please explain this");
+      if (preview) {
+        expect(call.followupRun.currentInboundContext?.text).toContain(preview.text);
+      }
+    },
+  );
 
   it("runs room events as contextual events instead of direct user prompts", async () => {
     vi.mocked(buildInboundUserContextPrefix).mockReturnValueOnce(

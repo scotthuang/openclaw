@@ -12,6 +12,7 @@ import { resolveSessionGoalDisplayState } from "../../config/sessions/goals.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { buildDeliveryFormatPrompt } from "../../infra/outbound/delivery-format-prompt.js";
+import type { UserTurnInput } from "../../sessions/user-turn-transcript.types.js";
 import type { EnvelopeFormatOptions } from "../envelope.js";
 import { formatAgentEnvelopeTimestamp } from "../envelope.js";
 import { getRequesterProfile } from "../requester-profile.js";
@@ -371,7 +372,9 @@ function isTelegramInboundContext(ctx: TemplateContext): boolean {
   );
 }
 
-function formatTelegramCurrentMessageContext(ctx: TemplateContext): string | undefined {
+function formatTelegramCurrentMessageContext(
+  ctx: TemplateContext,
+): { text: string; quote: string } | undefined {
   if (!isTelegramInboundContext(ctx)) {
     return undefined;
   }
@@ -384,9 +387,12 @@ function formatTelegramCurrentMessageContext(ctx: TemplateContext): string | und
     normalizePromptMetadataString(ctx.MessageSid) ??
     normalizePromptMetadataString(ctx.MessageSidFull);
   const header = messageId ? `#${messageId}:` : undefined;
-  return ["Current message:", `[Replying to: ${JSON.stringify(quote)}]`, header]
-    .filter((line) => line !== undefined)
-    .join("\n");
+  return {
+    text: ["Current message:", `[Replying to: ${JSON.stringify(quote)}]`, header]
+      .filter((line) => line !== undefined)
+      .join("\n"),
+    quote,
+  };
 }
 
 export function resolveInboundUserContextPromptJoiner(ctx: TemplateContext): " " | undefined {
@@ -476,12 +482,13 @@ export function buildInboundMetaSystemPrompt(
 }
 
 /** Builds per-turn context with host-generated structural facts and untrusted human content. */
-export function buildInboundUserContextPrefix(
+export function buildInboundUserContext(
   ctx: TemplateContext,
   envelope?: EnvelopeFormatOptions,
   sessionEntry?: SessionEntry,
-): string {
+): { text: string; replyPreview?: UserTurnInput["replyToPreview"] } {
   const blocks: string[] = [];
+  let replyPreview: UserTurnInput["replyToPreview"];
   const appendJsonContext = (label: string, payload: unknown) => {
     blocks.push(formatContextJsonBlock(markInboundContextLabel(label), payload));
   };
@@ -592,6 +599,12 @@ export function buildInboundUserContextPrefix(
       is_quote: ctx.ReplyToIsQuote === true ? true : undefined,
       body: replyToBody || undefined,
     });
+    if (replyToBody?.trim()) {
+      replyPreview = {
+        text: replyToBody,
+        ...(replyToSender ? { senderLabel: replyToSender } : {}),
+      };
+    }
   }
 
   const forwardedFrom = normalizePromptMetadataString(ctx.ForwardedFrom);
@@ -668,8 +681,20 @@ export function buildInboundUserContextPrefix(
   }
 
   if (currentMessageContext) {
-    blocks.push(currentMessageContext);
+    blocks.push(currentMessageContext.text);
+    replyPreview = {
+      text: currentMessageContext.quote,
+      ...(replyToSender ? { senderLabel: replyToSender } : {}),
+    };
   }
 
-  return blocks.join("\n\n");
+  return { text: blocks.join("\n\n"), ...(replyPreview ? { replyPreview } : {}) };
+}
+
+export function buildInboundUserContextPrefix(
+  ctx: TemplateContext,
+  envelope?: EnvelopeFormatOptions,
+  sessionEntry?: SessionEntry,
+): string {
+  return buildInboundUserContext(ctx, envelope, sessionEntry).text;
 }

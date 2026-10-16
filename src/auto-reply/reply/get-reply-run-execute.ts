@@ -98,6 +98,7 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
     media: promptMedia,
     inboundMediaIndexes,
     currentInboundContext,
+    replyPreview,
   } = state.promptBodies;
   const {
     params,
@@ -314,6 +315,9 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
               }
             : {}),
           ...(Object.keys(transport).length > 0 ? { transport } : {}),
+          // Provider message IDs cannot address transcript rows. Keep the selected
+          // quote as display-only context without inventing a navigable reply target.
+          ...(replyPreview ? { replyToPreview: replyPreview } : {}),
           ...(userTurnMediaForPersistence.length > 0 ? { media: userTurnMediaForPersistence } : {}),
           ...(mediaImageLayout ? { mediaImageLayout } : {}),
           // Persist the message's own arrival timestamp so the single

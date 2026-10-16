@@ -37,6 +37,11 @@ const enChatMessageMetadata = {
       replyingToLabel: "Replying to",
       originalUnavailable: "The original message is unavailable.",
       replyOriginalUnavailable: "Original message unavailable",
+      quotedMessage: {
+        label: "Quoted message",
+        expand: "Show quote",
+        collapse: "Collapse",
+      },
       message: en.chat.messages.message,
       currentMessage: "current message",
       actions: "Message actions",

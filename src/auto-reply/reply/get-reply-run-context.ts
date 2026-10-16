@@ -39,7 +39,7 @@ import { buildGroupIntro, buildSourceConversationContext } from "./groups.js";
 import { hasInboundMedia } from "./inbound-media.js";
 import {
   buildInboundMetaSystemPrompt,
-  buildInboundUserContextPrefix,
+  buildInboundUserContext,
   formatActiveGoalContext,
   resolveInboundUserContextPromptJoiner,
 } from "./inbound-meta.js";
@@ -362,18 +362,22 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
         sessionEntryHandle?.getCurrent() ??
         sessionEntry);
   // Synthetic turns retain routing facts without inventing user-role inbound context.
-  const buildInboundContextState = () => ({
-    activeGoalContext: formatActiveGoalContext(inboundContextSessionEntry),
-    inboundUserContext:
+  const buildInboundContextState = () => {
+    const inboundContext: ReturnType<typeof buildInboundUserContext> =
       isHeartbeat || isInternalEvent
-        ? ""
-        : buildInboundUserContextPrefix(
+        ? { text: "" }
+        : buildInboundUserContext(
             inboundUserContextSessionCtx,
             envelopeOptions,
             inboundContextSessionEntry,
-          ),
-  });
-  let { activeGoalContext, inboundUserContext } = buildInboundContextState();
+          );
+    return {
+      activeGoalContext: formatActiveGoalContext(inboundContextSessionEntry),
+      inboundUserContext: inboundContext.text,
+      inboundReplyPreview: inboundContext.replyPreview,
+    };
+  };
+  let { activeGoalContext, inboundUserContext, inboundReplyPreview } = buildInboundContextState();
   const refreshInboundContextAfterAdmissionWait = () => {
     if (isHeartbeat || isInternalEvent) {
       return;
@@ -382,7 +386,7 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
       sessionEntryHandle?.getCurrent() ??
       (sessionKey !== undefined ? sessionStore?.[sessionKey] : undefined) ??
       sessionEntry;
-    ({ activeGoalContext, inboundUserContext } = buildInboundContextState());
+    ({ activeGoalContext, inboundUserContext, inboundReplyPreview } = buildInboundContextState());
   };
   const inboundUserContextPromptJoiner = resolveInboundUserContextPromptJoiner(sessionCtx);
   const getPromptEnvelopeParams = (): Parameters<typeof buildReplyPromptEnvelopeBase>[0] => ({
@@ -447,7 +451,10 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
         Parameters<typeof buildReplyPromptEnvelope>[0],
         "prefixedBody" | "threadContextNote" | "systemEventBlocks" | "media"
       >,
-    ) => buildReplyPromptEnvelope({ ...getPromptEnvelopeParams(), ...additions }),
+    ) => ({
+      ...buildReplyPromptEnvelope({ ...getPromptEnvelopeParams(), ...additions }),
+      ...(inboundReplyPreview ? { replyPreview: inboundReplyPreview } : {}),
+    }),
     refreshInboundContextAfterAdmissionWait,
     terminalReplyExpectation,
   } as const;
